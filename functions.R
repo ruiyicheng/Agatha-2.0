@@ -105,33 +105,54 @@ tv.per <- function(targets,ofac,data){
     }
 }
 
+is.signal.par <- function(nm){
+###names of the signal parameters (as opposed to the noise, offset and trend
+###terms) in either the periodogram or the MCMC naming
+    grepl('^(P|per|K|e|omega|Mo|A|B|lnK|sqrecosw|sqresinw|Tc|dP|dTc)[0-9]+$',nm)
+}
+
 addpar <- function(par.old,par.new,nsig){
+###merge the parameters of the nsig-th signal (par.new: signal terms first,
+###then its noise terms) into those of the previous signals: the new signal's
+###terms are renamed with its index, the previous signals' terms are kept and
+###the noise terms of the latest fit replace the earlier ones
+    n0 <- names(par.new)
     if(nsig==1){
-        n0 <- names(par.new)
         if(any(n0=='A')|any(n0=='B')){
             names(par.new)[1:3] <- paste0(n0[1:3],1)
         }
-        par <- par.new
-    }else{
-        n0 <- names(par.new)
-        n1 <- n0
-        par <- par.old
-        if(any(n0=='A')|any(n0=='B')){
-            n1[1:3] <- paste0(n0[1:3],nsig)
-            names(par.new) <- n1
-            Npar.noise <- length(par.new)-3
-        }else if(any(n0=='Mo1') & !any(n0=='omega1')){
-            n1[1:3] <- gsub('1$',nsig,n0[1:3])
-            names(par.new) <- n1
-            Npar.noise <- length(par.new)-3
-        }else if(any(grepl('omega|Tc',n0))){
-            n1[1:5] <- gsub('1$',nsig,n0[1:5])
-            names(par.new) <- n1
-            Npar.noise <- length(par.new)-5
-        }
-        par <- c(par.old[-(length(par.old)-(Npar.noise:1)+1)],par.new)
+        return(par.new)
     }
-    return(par)
+    n1 <- n0
+    if(any(n0=='A')|any(n0=='B')){
+        n1[1:3] <- paste0(n0[1:3],nsig)
+    }else if(any(n0=='Mo1') & !any(n0=='omega1')){
+        n1[1:3] <- gsub('1$',nsig,n0[1:3])
+    }else if(any(grepl('omega|Tc',n0))){
+        n1[1:5] <- gsub('1$',nsig,n0[1:5])
+    }
+    names(par.new) <- n1
+    c(par.old[is.signal.par(names(par.old))],par.new)
+}
+
+addpar.stat <- function(stat.old,stat.new,nsig,keep=NULL){
+###addpar() for the MCMC statistics of sequential signals: every statistic (row)
+###is renamed and merged the same way as the parameter vector, so the table of
+###the combined fit keeps the posterior summaries of each signal. keep (the
+###names of the fitted parameters) drops derived columns such as reference
+###epochs, which the parameter vector does not carry
+    if(is.null(stat.new) || !is.matrix(stat.new)) return(NULL)
+    if(nsig>1 && (is.null(stat.old) || !is.matrix(stat.old))) return(NULL)
+    if(!is.null(keep)){
+        keep <- keep[keep%in%colnames(stat.new)]
+        if(length(keep)==0) return(NULL)
+        stat.new <- stat.new[,keep,drop=FALSE]
+    }
+    rows <- if(nsig==1) rownames(stat.new) else intersect(rownames(stat.old),rownames(stat.new))
+    if(length(rows)==0) return(NULL)
+    out <- t(sapply(rows,function(r) addpar(if(nsig==1) c() else stat.old[r,],stat.new[r,],nsig)))
+    rownames(out) <- rows
+    out
 }
 
 calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
@@ -151,6 +172,10 @@ calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
 ###number of harmonics of the signal in BFP/MLP; 2 or more fits eccentric orbits
     if(!exists('Nh')) Nh <- 1
     Nh <- max(1,as.integer(Nh))
+###eccentricity prior of the MCMC (list(type,a,b,sigma); see eprior.check)
+    e.prior <- eprior.check(if(exists('e.prior')) e.prior else NULL)
+###ln(BF) a further signal must exceed to be accepted by the sequential model comparison
+    if(!exists('lnBF.min') || length(lnBF.min)!=1 || !is.finite(lnBF.min)) lnBF.min <- 5
 ###red-noise model: 'ARMA' (per-set AR/MA orders) or 'GP' (shared SHO Gaussian process)
     if(!exists('noise.model')) noise.model <- 'ARMA'
     GP <- noise.model=='GP'
@@ -169,7 +194,7 @@ calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
             mcf <- FALSE
         }
     }
-    par.list <- sim.list <- phase.list <- per.list <- tits <- mc.list <- list()
+    par.list <- sim.list <- phase.list <- per.list <- tits <- mc.list <- model.list <- list()
     tits <- c()
     fs <- c()
     pars <- list()
@@ -389,18 +414,28 @@ calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
         cnames <- c(cnames,'P')
         cnames <- c(cnames,paste0(pers[i],'1signal:',gsub(' .+','',ypar),':',name))
 
-####calculate the Keplerian fit
-	if(Nsig.max>1){
-	     Pconv <- FALSE
-	}else{
-	     Pconv <- TRUE
-	}
+####calculate the Keplerian fit; periods are reported linearly (P1, P2, ...)
+###and converted back to the sampling form by par.P2per() when a fit is chained
+        Pconv <- TRUE
 ###the window function is not a signal to refine: no Keplerian, no MCMC
         mcf1 <- mcf && ypar!='Window Function'
         SigType1 <- if(ypar=='Window Function') 'circular' else SigType
-        fit <- sigfit(per=rv.ls,data=tab,SigType=SigType1,basis=basis,Ncores=Ncores,mcf=mcf1,Niter=Niter,Pconv=Pconv)
+        fit <- sigfit(per=rv.ls,data=tab,SigType=SigType1,basis=basis,Ncores=Ncores,mcf=mcf1,Niter=Niter,Pconv=Pconv,e.prior=e.prior)
 ###update the output from periodogram
         rv.ls <- fit$per
+###model comparison: ln(BF) of the first signal against no signal, from the
+###periodogram (BIC estimate; the Keplerian fit's own value with several sets)
+        model.comp <- NULL
+        if(ypar!='Window Function'){
+            lnBF1 <- if(!is.null(rv.ls$lnBF.kepler) && is.finite(rv.ls$lnBF.kepler)) as.numeric(rv.ls$lnBF.kepler) else
+                     if(per.type=='BFP') suppressWarnings(max(rv.ls$power,na.rm=TRUE)) else NA
+            if(!is.finite(lnBF1)) lnBF1 <- NA
+            model.comp <- data.frame(n=1,P=as.numeric(fit$popt)[1],lnBF=lnBF1,source='periodogram',
+                                     accepted=is.na(lnBF1) || lnBF1>lnBF.min,stringsAsFactors=FALSE)
+        }
+        llmax.prev <- if(is.null(fit$llmax)) NA else as.numeric(fit$llmax)
+        par.prev <- fit$ParSig
+        res.last <- fit$res
 
         pp <- cbind(fit$t,fit$y,fit$ysig0)
 
@@ -411,6 +446,7 @@ calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
         colnames(qq) <- paste0(c('tsim','ysim','ysim0'),'_sig1')
         sim.data <- cbind(sim.data,qq)
         par.data <- addpar(c(),fit$ParSig,1)
+        par.stat.data <- addpar.stat(NULL,fit$par.stat,1,keep=names(fit$ParSig))
 
         if(Nsig.max>1){
             if(per.type==per.type.seq){
@@ -429,9 +465,14 @@ calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
 ###multi-set MCMC, but there is no joint re-fit of all signals, so the combined
 ###model is assembled from the per-signal fits in the else branch below
         mcf2 <- mcf1 & !(multi.set & Nsig.max>1)
+###number of signals kept in the combined model (those accepted by the model comparison)
+        Nacc <- length(grep('^ysig_sig',colnames(phase.data)))
         if(mcf2){
-            if(Nsig.max>1 & !multi.set){
-                fit <- mcfit(rv.ls,data=tab[,1:3],tsim=fit$tsim0,Niter=Niter,SigType=SigType,basis=basis,ParSig=par.data,Pconv=TRUE,Ncores=Ncores)
+###with a single data set the accepted signals were refined together by the
+###joint MCMC of the sequential search (joint.fit); with one signal the fit of
+###that signal is already the joint fit
+            if(Nsig.max>1 & !multi.set & exists('joint.fit')){
+                fit <- joint.fit
             }
             mc <- fit$mc
             ParSig <- fit$ParSig
@@ -440,7 +481,7 @@ calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
             pp <- cbind(fit$ysig,fit$ysig0,fit$res)
             colnames(pp) <- paste0(c('y','ysig','res'),'_all')
             phase.data <- cbind(phase.data,pp)
-            if(Nsig.max>1){
+            if(!is.null(fit$ysim.sig)){
                 qq <- cbind(fit$ysim.sig)
             }else{
                 qq <- cbind(fit$ysim0)
@@ -448,14 +489,11 @@ calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
             colnames(qq) <- 'ysim_all'
             sim.data <- cbind(sim.data,qq)
         }else{
-            res <- fit$res
-            if(multi.set & Nsig.max>1 & exists('tmp') && !is.null(tmp$res)){
-###the residual after the last sequentially found and refined signal
-                res <- as.numeric(tmp$res)
-            }
-            if(Nsig.max>1){
-                ysig0 <- rowSums(phase.data[,paste0('ysig_sig',1:Nsig.max)])
-                ysim <- rowSums(sim.data[,paste0('ysim0_sig',1:Nsig.max)])
+###the residual after the last accepted (sequentially found and refined) signal
+            res <- as.numeric(res.last)
+            if(Nacc>1){
+                ysig0 <- rowSums(phase.data[,paste0('ysig_sig',1:Nacc)])
+                ysim <- rowSums(sim.data[,paste0('ysim0_sig',1:Nacc)])
             }else{
                 ysig0 <- phase.data[,'ysig_sig1']
                 ysim <- sim.data[,'ysim0_sig1']
@@ -471,14 +509,26 @@ calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
             qq <- cbind(ysim)
             colnames(qq) <- 'ysim_all'
             sim.data <- cbind(sim.data,qq)
+###sequentially refined signals: report the posterior summaries of every signal
+            if(!is.null(par.stat.data) && all(names(par.data)%in%colnames(par.stat.data))){
+                par.data <- par.stat.data[,names(par.data),drop=FALSE]
+            }
         }
 
-###attach common data
-        phase.attach <- cbind(t,y,dy)
-        colnames(phase.attach) <- c('t0','y0','ey0')
+###the data-set names travel with the parameters so that tables can label them
+        attr(par.data,'sets') <- per.target
+        if(!is.null(model.comp)){
+            attr(model.comp,'lnBF.min') <- lnBF.min
+            attr(model.comp,'Nsig.max') <- Nsig.max
+        }
+###attach common data; set0 is the index of the data set each point came from
+        set0 <- if(multi.set) as.integer(factor(set.id,levels=per.target)) else rep(1L,length(t))
+        phase.attach <- cbind(t,y,dy,set0)
+        colnames(phase.attach) <- c('t0','y0','ey0','set0')
         sim.attach <- t(t(fit$tsim0))
         colnames(sim.attach) <- 'tsim0'
         phase.data <- cbind(phase.data,phase.attach)
+        attr(phase.data,'sets') <- per.target
         sim.data <- cbind(sim.data,sim.attach)
         colnames(per.data) <- cnames
 
@@ -488,6 +538,7 @@ calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
         per.list[[ypar]] <- per.data
         par.list[[ypar]] <- par.data
         mc.list[[ypar]] <- mc
+        model.list[[ypar]] <- model.comp
     }
     if(!exists('Nsig.max')){
         Nsig.max <- 1
@@ -501,7 +552,26 @@ calc.1Dper <- function(Nmax.plots, vars,per.par,data,Ncores=8,basis='natural'){
     fname <- paste0(paste(per.target,collapse='_'),'_',paste(ypars,collapse='.'),'_',paste(per.type,collapse=''),'_AR',paste(Nar,collapse=''),'MA',paste(Nma,collapse=''),'_proxy',paste(Inds,collapse='.'),'_',Nsig.max,'sig_',paste(Pmaxs,collapse='d'),'d')
 #    cat('fname=',fname,'\n')
 #    save(list=ls(all=TRUE),file='test1.Robj')
-    return(list(per.list=per.list,mc=mc,phase.list=phase.list,sim.list=sim.list,par.list=par.list,tits=tits,pers=pers,levels=sig.levels,ylabs=ylabs,fname=fname,fs=fs,mc.list=mc.list))
+    return(list(per.list=per.list,mc=mc,phase.list=phase.list,sim.list=sim.list,par.list=par.list,tits=tits,pers=pers,levels=sig.levels,ylabs=ylabs,fname=fname,fs=fs,mc.list=mc.list,
+                model.comp=model.list,Nopt=lapply(model.list,model.Nopt)))
+}
+
+model.Nopt <- function(mc){
+###the most plausible number of signals: the signals accepted in sequence by
+###the model comparison (all of them when no comparison was possible)
+    if(is.null(mc) || nrow(mc)==0) return(NA)
+    acc <- cumprod(as.logical(mc$accepted))
+    sum(acc)
+}
+
+par.P2per <- function(par){
+###periods reported linearly ('P1') back to the sampling form ('per1' = ln P)
+    ip <- grep('^P\\d+$',names(par))
+    if(length(ip)>0){
+        par[ip] <- log(par[ip])
+        names(par)[ip] <- sub('^P','per',names(par)[ip])
+    }
+    par
 }
 
 par.a2m <- function(par,popt,data,SigType='kepler',time.unit=1){
@@ -596,9 +666,51 @@ par.m2a <- function(par.old){
     n0 <- names(par.old)
 }
 
+###########################################################################
+####Eccentricity prior of the MCMC fits
+eprior.default <- function() list(type='beta',a=0.867,b=3.03,sigma=0.1)
+
+eprior.check <- function(ep=NULL){
+###a complete, valid eccentricity prior description from a possibly partial one:
+###type 'beta' (Kipping 2013, MNRAS 434, L51: a=0.867, b=3.03 by default),
+###'uniform' on [0,1), or 'halfgauss' (half-Gaussian of scale sigma on e>=0)
+    d <- eprior.default()
+    if(is.null(ep) || !is.list(ep)) return(d)
+    ok <- function(v) length(v)==1 && is.finite(v) && v>0
+    type <- if(is.null(ep$type)) d$type else as.character(ep$type)[1]
+    type <- c(beta='beta',kipping='beta',uniform='uniform',flat='uniform',halfgauss='halfgauss',
+              gaussian='halfgauss',gauss='halfgauss')[tolower(type)]
+    if(is.na(type)) type <- d$type
+    list(type=unname(type),a=if(ok(ep$a)) as.numeric(ep$a) else d$a,b=if(ok(ep$b)) as.numeric(ep$b) else d$b,
+         sigma=if(ok(ep$sigma)) as.numeric(ep$sigma) else d$sigma)
+}
+
+eprior.log <- function(e,ep=NULL){
+###log prior density of the eccentricity e (scalar or vector; the sum is
+###returned). Outside [0,1) the density is zero. The beta density with a<1
+###diverges at e=0, so e is evaluated no closer than 1e-4 to the edges
+    ep <- eprior.check(ep)
+    if(length(e)==0) return(0)
+    if(any(!is.finite(e)) || any(e<0 | e>=1)) return(-Inf)
+    e <- pmin(pmax(e,1e-4),1-1e-4)
+    switch(ep$type,
+           uniform=0,
+           beta=sum(dbeta(e,ep$a,ep$b,log=TRUE)),
+           halfgauss=sum(log(2)+dnorm(e,mean=0,sd=ep$sigma,log=TRUE)),
+           stop('unknown eccentricity prior: ',ep$type))
+}
+
+eprior.describe <- function(ep=NULL){
+    ep <- eprior.check(ep)
+    switch(ep$type,
+           uniform='uniform on [0,1)',
+           beta=paste0('beta(a=',format(ep$a,digits=3),', b=',format(ep$b,digits=3),'; Kipping 2013)'),
+           halfgauss=paste0('half-Gaussian with sigma=',format(ep$sigma,digits=3)))
+}
+
 #mcfit <- function(startvalue,Niter,Ncores=1){
 mcfit <- function(per,data,tsim,Niter=1e3,SigType='kepler',basis='natural',ParSig=NULL,Pconv=FALSE,Ncores=8,
-                  mcmc.method='PT',Ntem=NULL,tem.min=NULL,swap.interval=10,mcmc.verbose=FALSE){
+                  mcmc.method='PT',Ntem=NULL,tem.min=NULL,swap.interval=10,mcmc.verbose=FALSE,e.prior=NULL){
 ###get initial parameters from agatha
 #    break()
     time.unit <- 365.25
@@ -620,6 +732,9 @@ mcfit <- function(per,data,tsim,Niter=1e3,SigType='kepler',basis='natural',ParSi
     period.par <- 'logP'
     bases <- rep(basis,10)
     Esd <- 0.1
+###eccentricity prior seen by prior.func() (mcmc_func.R is sourced locally below)
+    e.prior <- eprior.check(e.prior)
+    if(mcmc.verbose) cat('eccentricity prior:',eprior.describe(e.prior),'\n')
     phi.min <- wmin <- -1
     phi.max <- wmax <- 1
     ins <- 'none'
@@ -847,19 +962,21 @@ mcfit <- function(per,data,tsim,Niter=1e3,SigType='kepler',basis='natural',ParSi
     list(mc=mc,llmax=llmax,lpmax=lpmax,ParSig=ParSig,out=out,par.stat=par.stat,yma=yma,yar=yar,yred=yred,ysig=ysig,ysig0=as.numeric(ysig0),ysim.red=ysim.red,ysim.sig=ysim.sig,ytrend=ytrend,yproxy=yproxy,res=res,res.sig=res.sig,popt=popt,tsim0=tsim)#ysim.all=ysim.all
 }
 
-msmc.stat <- function(x){
+msmc.stat <- function(x,lp=NULL){
 ###summary statistics of one MCMC parameter, self-contained so that the result
 ###does not depend on which data.distr() happens to be visible (functions.R has
 ###a plotting helper of that name that shadows the mcmc_func.R version when the
-###app sources functions.R locally)
+###app sources functions.R locally). xopt is the value in the sample with the
+###highest lp (the MAP estimate when lp is the log posterior or likelihood).
     q <- as.numeric(quantile(x,c(0.1587,0.8413,0.5,0.01,0.99,0.1,0.9),na.rm=TRUE))
     mode <- tryCatch({ d <- density(x,na.rm=TRUE); d$x[which.max(d$y)] },error=function(e) q[3])
-    c(xminus.1sig=q[1],xplus.1sig=q[2],mode=as.numeric(mode),med=q[3],
+    xopt <- if(is.null(lp)) NA else as.numeric(x[which.max(lp)])
+    c(xopt=xopt,xminus.1sig=q[1],xplus.1sig=q[2],mode=as.numeric(mode),med=q[3],
       mean=mean(x,na.rm=TRUE),sd=sd(x),x1per=q[4],x99per=q[5],x10per=q[6],x90per=q[7])
 }
 
 mcfit.multiset <- function(per, data, set.id, tsim, Niter=1e3, SigType='kepler', Ncores=8,
-                           Ntem=NULL, tem.min=NULL, swap.interval=10, mcmc.verbose=FALSE){
+                           Ntem=NULL, tem.min=NULL, swap.interval=10, mcmc.verbose=FALSE, e.prior=NULL){
 ###PT-MCMC refinement of a multi-set fit: a shared signal (Keplerian or
 ###circular), one offset per data set, a shared linear trend, and one jitter
 ###per data set. With a GP periodogram the fixed GP covariance from the
@@ -946,10 +1063,15 @@ mcfit.multiset <- function(per, data, set.id, tsim, Niter=1e3, SigType='kepler',
     Npar <- length(start)
     Sd <- 2.4^2/Npar
     tol1 <- 1e-16
+###flat priors within the box except for the eccentricity (see eprior.log)
+    e.prior <- eprior.check(e.prior)
+    if(mcmc.verbose && SigType=='kepler') cat('eccentricity prior:',eprior.describe(e.prior),'\n')
     posterior <- function(param,tem=1,bases='natural'){
         ll <- loglike(param)
         if(!is.finite(ll)) ll <- -1e10
-        list(loglike=ll,logprior=0,post=ll*tem)
+        lp <- if(SigType=='kepler') eprior.log(param[['e1']],e.prior) else 0
+        if(!is.finite(lp)) lp <- -1e10
+        list(loglike=ll,logprior=lp,post=ll*tem+lp)
     }
     env <- environment()
     rebind <- function(f){ environment(f) <- env; f }
@@ -990,7 +1112,7 @@ mcfit.multiset <- function(per, data, set.id, tsim, Niter=1e3, SigType='kepler',
     pb <- ParSig
     pb[['P1']] <- log(pb[['P1']])
     names(pb)[names(pb)=='P1'] <- 'logP1'
-    par.stat <- sapply(1:Npar,function(i) msmc.stat(mc[,i]))
+    par.stat <- sapply(1:Npar,function(i) msmc.stat(mc[,i],mc[,'loglike']))
     colnames(par.stat) <- colnames(mc)[1:Npar]
     popt <- as.numeric(ParSig[['P1']])
     ysig0 <- signal.at(pb,t)
@@ -1007,7 +1129,7 @@ mcfit.multiset <- function(per, data, set.id, tsim, Niter=1e3, SigType='kepler',
 }
 
 sigfit.multiset <- function(per, data, t, tsim, SigType='circular', mcf=FALSE, Niter=1e3, Ncores=8,
-                            Ntem=NULL, tem.min=NULL, swap.interval=10, mcmc.verbose=FALSE){
+                            Ntem=NULL, tem.min=NULL, swap.interval=10, mcmc.verbose=FALSE, e.prior=NULL){
 ###Turn a multi-data-set periodogram into a fitted model, its residual and its
 ###phase-folded prediction. SigType selects a shared circular signal, a shared
 ###Keplerian signal or a purely stochastic (signal-free) red-noise model.
@@ -1027,7 +1149,7 @@ sigfit.multiset <- function(per, data, t, tsim, SigType='circular', mcf=FALSE, N
     mc <- c()
     if(mcf){
 ###PT-MCMC over the shared signal, per-set offsets, trend and per-set jitters
-        tmp <- mcfit.multiset(per=per,data=data,set.id=per$set.id,tsim=tsim,Niter=Niter,
+        tmp <- mcfit.multiset(per=per,data=data,set.id=per$set.id,tsim=tsim,Niter=Niter,e.prior=e.prior,
                               SigType=SigType,Ncores=Ncores,Ntem=Ntem,tem.min=tem.min,
                               swap.interval=swap.interval,mcmc.verbose=mcmc.verbose)
         popt <- tmp$popt
@@ -1094,7 +1216,7 @@ sigfit.multiset <- function(per, data, t, tsim, SigType='circular', mcf=FALSE, N
 }
 
 sigfit <- function(per,data,SigType='circular',basis='natural',mcf=TRUE,Ncores=8,Niter=1e3,Pconv=FALSE,res.type='sig',
-                   mcmc.method='PT',Ntem=NULL,tem.min=NULL,swap.interval=10,mcmc.verbose=FALSE){
+                   mcmc.method='PT',Ntem=NULL,tem.min=NULL,swap.interval=10,mcmc.verbose=FALSE,e.prior=NULL){
 ###This function is to modify the output of various periodograms to give residual, model prediction, and optimal parameters as well as posterior/likelihood samples
     ##x is a list
     ##SigType is either circular or kepler
@@ -1122,7 +1244,7 @@ sigfit <- function(per,data,SigType='circular',basis='natural',mcf=TRUE,Ncores=8
     popt <- per$Popt
     save.data <- FALSE
     if(isTRUE(per$multi_set)){
-        return(sigfit.multiset(per=per,data=data,t=t,tsim=tsim,SigType=SigType,mcf=mcf,Niter=Niter,Ncores=Ncores,
+        return(sigfit.multiset(per=per,data=data,t=t,tsim=tsim,SigType=SigType,mcf=mcf,Niter=Niter,Ncores=Ncores,e.prior=e.prior,
                                Ntem=Ntem,tem.min=tem.min,swap.interval=swap.interval,mcmc.verbose=mcmc.verbose))
     }
 #    }else{
@@ -1228,7 +1350,7 @@ sigfit <- function(per,data,SigType='circular',basis='natural',mcf=TRUE,Ncores=8
 #    }
 #    save(list=ls(all=TRUE),file='test.Robj')
     if(mcf){
-        tmp <- mcfit(per=per,data=data,tsim=tsim,Niter=Niter,SigType=SigType,basis=basis,Pconv=Pconv,Ncores=Ncores,
+        tmp <- mcfit(per=per,data=data,tsim=tsim,Niter=Niter,SigType=SigType,basis=basis,Pconv=Pconv,Ncores=Ncores,e.prior=e.prior,
                      mcmc.method=mcmc.method,Ntem=Ntem,tem.min=tem.min,swap.interval=swap.interval,
                      mcmc.verbose=mcmc.verbose)
         startvalue <- ParSig <- tmp$ParSig
@@ -1268,7 +1390,8 @@ sigfit <- function(per,data,SigType='circular',basis='natural',mcf=TRUE,Ncores=8
     ts <- t%%popt
     tsims <- tsim2
     ysims <- ysim2
-    return(list(per=per,t=ts,y=as.numeric(ysig),ey=data[,3],res=as.numeric(res),ysig0=as.numeric(ysig0),tsim0=tsim0,ysim0=ysim0,tsim=tsims,ysim=ysims,ParSig=ParSig,par.stat=par.stat,popt=popt,mc=mc))
+    return(list(per=per,t=ts,y=as.numeric(ysig),ey=data[,3],res=as.numeric(res),ysig0=as.numeric(ysig0),tsim0=tsim0,ysim0=ysim0,tsim=tsims,ysim=ysims,ParSig=ParSig,par.stat=par.stat,popt=popt,mc=mc,
+                llmax=if(mcf && !is.null(tmp$llmax)) as.numeric(tmp$llmax) else NA))
 }
 
 ###########################################################################
@@ -1286,6 +1409,39 @@ if(!exists('tcol')){
     }
 }
 pub.col <- list(model='#D55E00',peak='#0072B2',data='black',err=tcol('black',50),level='grey40',res='grey20')
+
+###A panel grid that, unlike par(mfrow), lets a panel span the full width of
+###its row (tables). Panels are placed with par(fig); a full grid starts a new
+###page, as mfrow does.
+.fig.grid <- new.env()
+grid.start <- function(nrow,ncol,cex=1,heights=NULL){
+###heights: relative heights of the rows (equal by default), e.g. short rows
+###for section headers
+    pub.par(cex=cex)
+    if(is.null(heights) || length(heights)!=nrow) heights <- rep(1,nrow)
+    .fig.grid$nr <- nrow; .fig.grid$nc <- ncol; .fig.grid$k <- 0; .fig.grid$active <- TRUE
+    .fig.grid$ytop <- 1-c(0,cumsum(heights))/sum(heights)
+    invisible()
+}
+grid.stop <- function(){ .fig.grid$active <- FALSE; invisible() }
+grid.next <- function(span=1){
+###move to the next free cell (to the start of the next row for span>1) and
+###make it the current figure; no-op when no grid is active
+    g <- .fig.grid
+    if(!isTRUE(g$active)) return(invisible(FALSE))
+    nr <- g$nr; nc <- g$nc; k <- g$k
+    span <- min(span,nc)
+    if(span>1 && k%%nc!=0) k <- k+(nc-k%%nc)
+    if(k>=nr*nc) k <- 0
+    row <- k%/%nc+1; col <- k%%nc+1
+    yt <- g$ytop
+    if(is.null(yt) || length(yt)!=nr+1) yt <- 1-(0:nr)/nr
+    fig <- c((col-1)/nc,(col-1+span)/nc,yt[row+1],yt[row])
+    if(k==0){ par(fig=c(0,1,0,1),new=FALSE); plot.new() }
+    par(fig=fig,new=TRUE)
+    g$k <- k+span
+    invisible(TRUE)
+}
 
 pub.par <- function(mfrow=c(1,1),cex=1){
     par(mfrow=mfrow,mar=c(4.5,5,2.6,1.2),mgp=c(2.9,0.7,0),las=1,tcl=-0.4,
@@ -1372,44 +1528,233 @@ panel.periodogram <- function(per.list,ypar,i,title,levels=NULL,SigType='circula
     invisible(list(Popt=pmax,power=wmax))
 }
 
+###data sets are told apart by a fixed, colour-blind-safe (Okabe-Ito based)
+###hue order and, as a second cue, by the point symbol; the vermillion of the
+###model curve is deliberately left out
+set.palette <- c('#0072B2','#E69F00','#009E73','#CC79A7','#56B4E9','#5D3A9B','#A6761D','#1B9E77')
+set.pch <- c(21,22,24,23,25,21,22,24)
+
+set.label <- function(sets){
+###display names of the data sets: file names are 'star_instrument', so the
+###star is dropped and the instrument kept; the full names stay when that
+###would make two sets indistinguishable
+    sets <- as.character(sets)
+    if(length(sets)==0) return(sets)
+    short <- ifelse(grepl('_',sets),sub('^[^_]+_','',sets),sets)
+    short[!nzchar(short)] <- sets[!nzchar(short)]
+    if(any(duplicated(short))) sets else short
+}
+
+set.info <- function(ph){
+###which data set each point of a phase.list entry belongs to, with the set
+###names, colours and symbols; NULL for a single data set so that single-set
+###figures keep their plain look
+    if(is.null(ph) || !('set0'%in%colnames(ph))) return(NULL)
+    id <- as.integer(ph[,'set0'])
+    n <- suppressWarnings(max(id,na.rm=TRUE))
+    if(!is.finite(n) || n<2) return(NULL)
+    sets <- attr(ph,'sets')
+    if(is.null(sets) || length(sets)<n) sets <- paste('Set',1:n)
+    k <- (1:n-1)%%length(set.palette)+1
+    list(id=id,names=set.label(sets[1:n]),col=set.palette[k],pch=set.pch[k])
+}
+
+points.sets <- function(t,y,ey,si,col1=pub.col$data){
+###error bars and points; coloured by data set when there are several
+    if(is.null(si)){
+        try(arrows(t,y-ey,t,y+ey,length=0.02,angle=90,code=3,col=pub.col$err),TRUE)
+        points(t,y,pch=21,bg='white',col=col1,cex=0.9)
+    }else{
+        try(arrows(t,y-ey,t,y+ey,length=0.02,angle=90,code=3,col=adjustcolor(si$col[si$id],alpha.f=0.5)),TRUE)
+        points(t,y,pch=si$pch[si$id],bg=si$col[si$id],col='black',cex=0.9,lwd=0.6)
+    }
+}
+
+legend.sets <- function(si,extra=NULL,pos='topleft'){
+###legend naming the data sets, followed by optional text lines (e.g. the RMS)
+    n <- length(si$names); m <- length(extra)
+    if(n+m==0) return(invisible())
+    legend(pos,bg='white',box.col='white',legend=c(si$names,extra),
+           pch=c(si$pch,rep(NA,m)),pt.bg=c(si$col,rep(NA,m)),col=c(rep('black',n),rep(NA,m)),
+           pt.cex=0.9,text.col=c(rep('black',n),rep(pub.col$peak,m)),cex=if(n>0) 0.9 else 1)
+}
+
+ylim.legend <- function(ylim,nleg){
+###head room above the data for a legend of nleg lines
+    if(nleg<1) return(ylim)
+    ylim[2] <- ylim[2]+0.07*(nleg+1)*diff(ylim)
+    ylim
+}
+
 panel.phase <- function(phase.list,sim.list,ypar,i,title,pub=TRUE){
     ph <- phase.list[[ypar]]; sm <- sim.list[[ypar]]
     t <- ph[,paste0('t_sig',i)]; y <- ph[,paste0('y_sig',i)]; ey <- ph[,'ey0']
     tsim <- sm[,paste0('tsim_sig',i)]; ysim <- sm[,paste0('ysim_sig',i)]
-    ylim <- range(c(y-ey,y+ey,ysim),na.rm=TRUE)
+    si <- set.info(ph)
+    ylim <- ylim.legend(range(c(y-ey,y+ey,ysim),na.rm=TRUE),length(si$names))
     plot(t,y,type='n',xaxt='n',yaxt='n',xlab='Phase [day]',ylab=ylab.obs(ypar),ylim=ylim,
          main=if(pub) pretty.title(title) else title)
     pub.axes()
-    arrows(t,y-ey,t,y+ey,length=0.02,angle=90,code=3,col=pub.col$err)
+    if(is.null(si)) arrows(t,y-ey,t,y+ey,length=0.02,angle=90,code=3,col=pub.col$err)
     lines(tsim,ysim,col=pub.col$model,lwd=2.5)
-    points(t,y,pch=21,bg='white',col=pub.col$data,cex=0.9)
+    if(is.null(si)){
+        points(t,y,pch=21,bg='white',col=pub.col$data,cex=0.9)
+    }else{
+        points.sets(t,y,ey,si)
+        legend.sets(si,pos='topright')
+    }
 }
 
 panel.fit <- function(phase.list,sim.list,ypar,title,pub=TRUE){
     ph <- phase.list[[ypar]]; sm <- sim.list[[ypar]]
     t <- ph[,'t0']; ey <- ph[,'ey0']; y <- ph[,'y_all']
     tsim <- sm[,'tsim0']+min(t); ysim <- sm[,'ysim_all']
-    ylim <- range(c(y-ey,y+ey,ysim),na.rm=TRUE)
+    si <- set.info(ph)
+    ylim <- ylim.legend(range(c(y-ey,y+ey,ysim),na.rm=TRUE),length(si$names)+1)
     plot(t,y,type='n',xaxt='n',yaxt='n',xlab='Time [day]',ylab=ylab.obs(ypar),ylim=ylim,
          main=if(pub) gsub(', signal \\d+',', combined fit',pretty.title(title)) else gsub('\\d signal','combined fit',title))
     pub.axes()
     lines(tsim,ysim,col=pub.col$model,lwd=2)
-    try(arrows(t,y-ey,t,y+ey,length=0.02,angle=90,code=3,col=pub.col$err),TRUE)
-    points(t,y,pch=21,bg='white',col=pub.col$data,cex=0.9)
-    legend('topleft',bg='white',box.col='white',legend=paste0('RMS = ',format(sd(y),digits=3)),text.col=pub.col$peak)
+    points.sets(t,y,ey,si)
+    legend.sets(si,extra=paste0('RMS = ',format(sd(y),digits=3)))
 }
 
 panel.residual <- function(phase.list,ypar,title,pub=TRUE){
     ph <- phase.list[[ypar]]
     t <- ph[,'t0']; ey <- ph[,'ey0']; res <- ph[,'res_all']
-    ylim <- range(c(res-ey,res+ey),na.rm=TRUE)
+    si <- set.info(ph)
+    ylim <- ylim.legend(range(c(res-ey,res+ey),na.rm=TRUE),length(si$names)+1)
     plot(t,res,type='n',xaxt='n',yaxt='n',xlab='Time [day]',ylab=paste('Residual',if(ypar=='RV') '[m/s]' else ''),ylim=ylim,
          main=if(pub) gsub(', signal \\d+',', residual',pretty.title(title)) else gsub('\\d signal','residual',title))
     pub.axes()
     abline(h=0,lty=3,col=pub.col$level)
-    try(arrows(t,res-ey,t,res+ey,length=0.02,angle=90,code=3,col=pub.col$err),TRUE)
-    points(t,res,pch=21,bg='white',col=pub.col$res,cex=0.9)
-    legend('topleft',bg='white',box.col='white',legend=paste0('RMS = ',format(sd(res),digits=3)),text.col=pub.col$peak)
+    points.sets(t,res,ey,si,col1=pub.col$res)
+    legend.sets(si,extra=paste0('RMS = ',format(sd(res),digits=3)))
+}
+
+par.table <- function(pl){
+###the fitted parameters of one observable as a table. With an MCMC run: the
+###MAP value (sample of maximum likelihood), mean, median and the 16 and 84 per
+###cent (1 sigma) quantiles; otherwise the maximum-likelihood values alone
+    if(is.null(pl) || length(pl)==0) return(NULL)
+    if(is.matrix(pl)){
+        rn <- rownames(pl)
+        get <- function(r) if(r%in%rn) as.numeric(pl[r,]) else rep(NA,ncol(pl))
+        map <- if('xopt'%in%rn && any(is.finite(pl['xopt',]))) get('xopt') else get('mode')
+        tab <- data.frame(Parameter=colnames(pl),MAP=map,Mean=get('mean'),Median=get('med'),
+                          q16=get('xminus.1sig'),q84=get('xplus.1sig'),stringsAsFactors=FALSE)
+        if(!('xopt'%in%rn && any(is.finite(pl['xopt',])))) colnames(tab)[2] <- 'Mode'
+    }else{
+        tab <- data.frame(Parameter=names(pl),MAP=as.numeric(pl),stringsAsFactors=FALSE)
+        colnames(tab)[2] <- 'Max. likelihood'
+    }
+    rownames(tab) <- NULL
+###per-set parameters carry the instrument name only (see set.label)
+    sets <- attr(pl,'sets')
+    if(!is.null(sets) && length(sets)>1){
+        full <- make.names(as.character(sets)); short <- make.names(set.label(sets))
+        for(k in order(nchar(full),decreasing=TRUE)){
+            tab$Parameter <- sub(paste0('_',full[k],'$'),paste0('_',short[k]),tab$Parameter)
+        }
+    }
+    tab
+}
+
+draw.table <- function(cells,hdr,main,note=NULL,adj=NULL){
+###a text table on the current device: cells is a character matrix, hdr the
+###column headers; the first column is left-aligned, the others right-aligned
+###unless adj says otherwise. Column widths come from the widest entry; the
+###text shrinks when the table is wider than the panel and the columns spread
+###when it is narrower
+    op <- par(mar=c(1,1,2.6,1),xpd=NA); on.exit(par(op))
+    plot.new(); plot.window(xlim=c(0,1),ylim=c(0,1),xaxs='i',yaxs='i')
+    title(main=main)
+    if(is.null(cells) || nrow(cells)==0){
+        text(0.5,0.5,'nothing to report',col=pub.col$level)
+        return(invisible(NULL))
+    }
+    nr <- nrow(cells); nc <- ncol(cells)
+    if(is.null(adj)) adj <- c(0,rep(1,nc-1))
+    cex <- min(1,20/(nr+3))
+    w <- sapply(1:nc,function(j) max(strwidth(c(hdr[j],cells[,j]),cex=cex,font=2)))
+    gap <- strwidth('MM',cex=cex)
+    tot <- sum(w)+gap*(nc-1)
+    if(tot>0.96){
+        f <- 0.96/tot
+        cex <- cex*f; w <- w*f; gap <- gap*f; tot <- 0.96
+    }else if(nc>1){
+###spread the columns, but not so far that a narrow table looks scattered
+        gap <- gap+min((0.96-tot)/(nc-1),0.22)
+    }
+    xs <- 0.02+w[1]
+    if(nc>1) for(j in 2:nc) xs <- c(xs,xs[j-1]+gap+w[j])
+    xs[1] <- 0.02
+###columns of adj 0 anchor at their left edge, of adj 1 at their right edge
+    xl <- xs-w; xl[1] <- 0.02
+    xpos <- ifelse(adj==0,xl,xs)
+    lh <- min(0.94/(nr+2.6),2.2*strheight('X',cex=cex))
+    y0 <- 0.97-0.5*lh
+    for(j in 1:nc){
+        text(xpos[j],y0,hdr[j],adj=c(adj[j],0.5),font=2,cex=cex)
+        text(rep(xpos[j],nr),y0-(1:nr)*lh,cells[,j],adj=c(adj[j],0.5),cex=cex)
+    }
+    segments(0,y0-0.55*lh,1,y0-0.55*lh,col=pub.col$level)
+    segments(0,y0-(nr+0.55)*lh,1,y0-(nr+0.55)*lh,col=pub.col$level)
+    if(!is.null(note)){
+        for(k in seq_along(note)){
+            cn <- min(0.75*cex,0.96/strwidth(note[k],cex=1))
+            text(0.02,y0-(nr+0.7+0.8*k)*lh,note[k],adj=c(0,0.5),cex=cn,col=pub.col$level)
+        }
+    }
+    invisible(NULL)
+}
+
+panel.partable <- function(par.list,ypar,title,pub=TRUE){
+###a panel listing the fitted parameters (see par.table) so that the table can
+###be saved alongside the figures
+    tab <- par.table(par.list[[ypar]])
+    main <- if(pub) gsub(', signal \\d+',', fitted parameters',pretty.title(title)) else gsub('\\d signal','fitted parameters',title)
+    if(is.null(tab)){
+        draw.table(NULL,NULL,main)
+        return(invisible(NULL))
+    }
+    hdr <- colnames(tab)
+    hdr[hdr=='q16'] <- 'q16%'
+    hdr[hdr=='q84'] <- 'q84%'
+    fmt <- function(x) ifelse(is.finite(x),formatC(x,digits=4,format='g'),'')
+    cells <- cbind(tab$Parameter,sapply(tab[,-1,drop=FALSE],fmt))
+    cells <- matrix(as.character(cells),nrow=nrow(tab))
+    note <- if(ncol(tab)>2) 'MAP: sample of maximum likelihood; q16%, q84%: 16 and 84 per cent quantiles (1 sigma interval)' else NULL
+    draw.table(cells,hdr,main,note=note)
+    invisible(tab)
+}
+
+panel.modelcomp <- function(model.list,ypar,title,pub=TRUE){
+###the sequential model comparison of one observable: for each signal the
+###period, the ln(BF) against the model without it, where that number comes
+###from, and whether it was accepted; the most plausible number of signals
+###follows from the sequence of accepted signals
+    mc <- model.list[[ypar]]
+    main <- if(pub) gsub(', signal \\d+',', model comparison',pretty.title(title)) else gsub('\\d signal','model comparison',title)
+    if(is.null(mc) || nrow(mc)==0){
+        draw.table(NULL,NULL,main)
+        return(invisible(NULL))
+    }
+    thr <- attr(mc,'lnBF.min'); if(is.null(thr)) thr <- 5
+    nmax <- attr(mc,'Nsig.max')
+    nopt <- model.Nopt(mc)
+    cells <- cbind(paste('Signal',mc$n),ifelse(is.finite(mc$P),formatC(mc$P,digits=5,format='g'),''),
+                   ifelse(is.finite(mc$lnBF),formatC(mc$lnBF,digits=3,format='f'),'n/a'),
+                   ifelse(mc$source=='MCMC','joint MCMC (BIC)','periodogram (BIC)'),
+                   ifelse(mc$accepted,'yes','no'))
+    hdr <- c('Model','Period [d]','ln(BF) vs previous','ln(BF) from','Accepted')
+    note <- c(paste0('Most plausible number of signals: ',nopt,
+                     if(!is.null(nmax) && nopt>=nmax) paste0(' (the maximum searched, ',nmax,')') else '',
+                     '; a signal is accepted when ln(BF) > ',format(thr,digits=3),
+                     if(any(is.na(mc$lnBF))) '; n/a: no Bayes factor for this periodogram type (accepted by default)' else ''),
+              'ln(BF) = difference of maximum log likelihoods minus (extra parameters/2) ln N, i.e. the BIC estimate.')
+    draw.table(cells,hdr,main,note=note,adj=c(0,1,1,0,0))
+    invisible(mc)
 }
 
 list.single.plots <- function(d){
@@ -1429,6 +1774,12 @@ list.single.plots <- function(d){
             }
             out <- rbind(out,data.frame(label=paste0('Combined fit: ',ypar),kind='fit',ypar=ypar,index=1,stringsAsFactors=FALSE))
             out <- rbind(out,data.frame(label=paste0('Residual: ',ypar),kind='residual',ypar=ypar,index=1,stringsAsFactors=FALSE))
+            if(ypar!='Window Function' && !is.null(d$par.list[[ypar]])){
+                out <- rbind(out,data.frame(label=paste0('Parameter table: ',ypar),kind='partable',ypar=ypar,index=1,stringsAsFactors=FALSE))
+            }
+            if(!is.null(d$model.comp[[ypar]])){
+                out <- rbind(out,data.frame(label=paste0('Model comparison: ',ypar),kind='modelcomp',ypar=ypar,index=1,stringsAsFactors=FALSE))
+            }
         }
     }
     out
@@ -1448,6 +1799,10 @@ plot1D.single <- function(d,kind,ypar,index=1,SigType='circular',pub=TRUE){
         panel.fit(d$phase.list,d$sim.list,ypar,titles[1],pub=pub)
     }else if(kind=='residual'){
         panel.residual(d$phase.list,ypar,titles[1],pub=pub)
+    }else if(kind=='partable'){
+        panel.partable(d$par.list,ypar,titles[1],pub=pub)
+    }else if(kind=='modelcomp'){
+        panel.modelcomp(d$model.comp,ypar,titles[1],pub=pub)
     }
 }
 
@@ -1480,15 +1835,21 @@ save.single.plot <- function(file,format='png',width=6,height=4.5,dpi=300,expr){
     invisible(file)
 }
 
-phase1D.plot <- function(phase.list,sim.list,tits,download=FALSE,index=NULL,repar=TRUE,pub=TRUE){
-    if(repar){
-        if(is.null(index)){
-            pub.par(mfrow=c(ceiling(Nmax.plots/2),2))
-        }
-        if(download & is.null(index)){
-            pub.par(mfrow=c(2,2),cex=0.9)
-        }
+plot1D.grid <- function(download=FALSE){
+###the panel grid of the bundled figures: two columns; the on-screen figure is
+###one tall page, the download is paginated 2x2
+    if(download){
+        grid.start(2,2,cex=0.9)
+    }else{
+        grid.start(ceiling(Nmax.plots/2),2)
     }
+}
+
+phase1D.plot <- function(phase.list,sim.list,tits,download=FALSE,index=NULL,repar=TRUE,pub=TRUE,par.list=NULL,model.comp=NULL){
+###phase-folded signals, combined fit and residual of every observable; with
+###par.list the fitted parameters follow as a table spanning the full width,
+###with model.comp the sequential model comparison likewise
+    if(repar && is.null(index)) plot1D.grid(download)
     for(ypar in names(phase.list)){
         if(!is.null(index)){
             inds <- index
@@ -1497,25 +1858,31 @@ phase1D.plot <- function(phase.list,sim.list,tits,download=FALSE,index=NULL,repa
         }
         titles <- tits[grepl(paste0(';',ypar,';'),tits)]
         for(i in inds){
+            grid.next()
             panel.phase(phase.list,sim.list,ypar,i,titles[i],pub=pub)
         }
+        grid.next()
         panel.fit(phase.list,sim.list,ypar,titles[max(inds)],pub=pub)
+        grid.next()
         panel.residual(phase.list,ypar,titles[max(inds)],pub=pub)
+        if(ypar!='Window Function' && !is.null(par.list[[ypar]])){
+            grid.next(2)
+            panel.partable(par.list,ypar,titles[max(inds)],pub=pub)
+        }
+        if(!is.null(model.comp[[ypar]])){
+            grid.next(2)
+            panel.modelcomp(model.comp,ypar,titles[max(inds)],pub=pub)
+        }
     }
 }
 
-combined.plot <- function(per.list,phase.list,sim.list,tits,pers,levels,ylabs,SigType='circular',download=FALSE,index=NULL,pub=TRUE,par.list=NULL){
+combined.plot <- function(per.list,phase.list,sim.list,tits,pers,levels,ylabs,SigType='circular',download=FALSE,index=NULL,pub=TRUE,par.list=NULL,model.comp=NULL){
     per1D.plot(per.list,tits,pers,levels,ylabs,download=download,index=index,SigType=SigType,pub=pub,par.list=par.list)
-    phase1D.plot(phase.list,sim.list,tits=tits,download=download,index=index,repar=FALSE,pub=pub)
+    phase1D.plot(phase.list,sim.list,tits=tits,download=download,index=index,repar=FALSE,pub=pub,par.list=par.list,model.comp=model.comp)
 }
 
-per1D.plot <- function(per.list,tits,pers,levels,ylabs,download=FALSE,index=NULL,SigType='circular',pub=TRUE,par.list=NULL){
-    if(is.null(index)){
-        pub.par(mfrow=c(ceiling(Nmax.plots/2),2))
-    }
-    if(download & is.null(index)){
-        pub.par(mfrow=c(2,2),cex=0.9)
-    }
+per1D.plot <- function(per.list,tits,pers,levels,ylabs,download=FALSE,index=NULL,SigType='circular',pub=TRUE,par.list=NULL,repar=TRUE){
+    if(repar && is.null(index)) plot1D.grid(download)
     gi <- 0
     for(ypar in names(per.list)){
         np <- ncol(per.list[[ypar]])-1
@@ -1525,6 +1892,7 @@ per1D.plot <- function(per.list,tits,pers,levels,ylabs,download=FALSE,index=NULL
 ###significance levels are stored per periodogram across all observables
             lv <- if(is.matrix(levels) && ncol(levels)>=gi+i) levels[,gi+i] else NULL
             Pmark <- reported.period(par.list,ypar,i)
+            grid.next()
             panel.periodogram(per.list,ypar,i,titles[i],levels=lv,SigType=SigType,pub=pub,Pmark=Pmark)
         }
         gi <- gi+np
@@ -1540,7 +1908,13 @@ reported.period <- function(par.list,ypar,i){
     if(is.null(v) || !is.finite(v)) NULL else as.numeric(v)
 }
 
-per2D.data <- function(vars,per.par,data){
+per2D.data <- function(vars,per.par,data,fit1D=NULL){
+###fit1D: a calc.1Dper() result; with per.par$use.fit TRUE the moving
+###periodogram is computed on its signal-only series (the data minus the
+###per-set offsets, the trend and the red-noise model of that fit, i.e. the
+###MCMC solution when MCMC was run), which combines the data sets on a common
+###zero point and so extends the baseline for testing the time consistency of
+###long-period signals
     var <- names(per.par)
     for(k in 1:length(var)){
         assign(var[k],per.par[[var[k]]])
@@ -1574,6 +1948,35 @@ per2D.data <- function(vars,per.par,data){
         Nar <- 0
         Nmas <- rep(0,length(Nmas))
         Nars <- rep(0,length(Nars))
+    }
+###the signal-only series of the 1D fit replaces the data and the noise model
+    use.fit <- exists('use.fit') && isTRUE(use.fit) && !is.null(fit1D)
+    if(use.fit){
+        var <- pars[[i]]$var
+        per.type <- pars[[i]]$per.type
+        ph <- fit1D$phase.list[[var]]
+        if(is.null(ph) || !('y_all'%in%colnames(ph))){
+            stop('the 1D fit has no combined model for ',var,'; compute the 1D periodogram for this observable first')
+        }
+        sets <- attr(ph,'sets')
+        if(is.null(sets)) sets <- per.target
+        if(!setequal(sets,per.target)){
+            stop('the 1D fit was made for ',paste(sets,collapse=', '),' but the moving periodogram is asked for ',
+                 paste(per.target,collapse=', '),'; select the same data sets or recompute the 1D periodogram')
+        }
+        ord <- order(as.numeric(ph[,'t0']))
+        t <- as.numeric(ph[ord,'t0']); y <- as.numeric(ph[ord,'y_all']); dy <- as.numeric(ph[ord,'ey0'])
+        set0 <- if('set0'%in%colnames(ph)) as.integer(ph[ord,'set0']) else rep(1L,length(t))
+        adaptive <- exists('adaptive') && isTRUE(adaptive)
+        mp <- MP(t=t,y=y,dy=dy,Dt=Dt,nbin=Nbin,ofac=ofac,fmin=frange[1],fmax=frange[2],per.type=per.type,sj=0,Nma=0,Nar=0,Indices=NULL,adaptive=adaptive)
+        fname <- paste0(paste(per.target,collapse='_'),'_MP_',paste(per.type,collapse=''),'_signalonly',if(adaptive) '_adaptive' else '')
+        out <- list(t=t,y=y,dy=dy,xx=mp$tmid,yy=mp$P,zz=mp$powers,zz.rel=mp$rel.powers,fname=fname,ypar=var,
+                    set=per.target[match(sets[set0],per.target)],signal.only=TRUE,tstart=mp$tstart,tend=mp$tend,adaptive=adaptive)
+        if(length(per.target)>1){
+            out$subdata <- lapply(1:length(per.target),function(j) data[[per.target[j]]])
+            out$idata <- lapply(per.target,function(s){ k <- set0==match(s,sets); cbind(t[k],y[k],dy[k]) })
+        }
+        return(out)
     }
     Inds.sets <- Inds
     if(length(per.target)==1){
@@ -1619,21 +2022,22 @@ per2D.data <- function(vars,per.par,data){
     t <- tab[,1]
     y <- tab[,ypar]
     dy <- tab[,3]
+    adaptive <- exists('adaptive') && isTRUE(adaptive)
     if(length(per.target)==1){
-        mp <- MP(t=t,y=y,dy=dy,Dt=Dt,nbin=Nbin,ofac=ofac,fmin=frange[1],fmax=frange[2],per.type=per.type,sj=0,Nma=Nma,Nar=Nar,Indices=Indices,GP=GP,gp.par=gp.par)
+        mp <- MP(t=t,y=y,dy=dy,Dt=Dt,nbin=Nbin,ofac=ofac,fmin=frange[1],fmax=frange[2],per.type=per.type,sj=0,Nma=Nma,Nar=Nar,Indices=Indices,GP=GP,gp.par=gp.par,adaptive=adaptive)
     }else{
 ###the per-set noise (ARMA or GP) was removed in combine.data(); the combined residual is analysed white
-        mp <- MP(t=t,y=y,dy=dy,Dt=Dt,nbin=Nbin,ofac=ofac,fmin=frange[1],fmax=frange[2],per.type=per.type,sj=0,Nma=0,Nar=0,Indices=Indices)
+        mp <- MP(t=t,y=y,dy=dy,Dt=Dt,nbin=Nbin,ofac=ofac,fmin=frange[1],fmax=frange[2],per.type=per.type,sj=0,Nma=0,Nar=0,Indices=Indices,adaptive=adaptive)
     }
     x2 <- mp$tmid
     y2 <- mp$P
     z2 <- mp$powers
     z2.rel <- mp$rel.powers
-    fname <- paste0(paste(per.target,collapse='_'),'_MP_',paste(per.type,collapse=''),if(GP) '_GP' else paste0('_MA',paste(Nmas,collapse='')),'proxy',paste(Inds,collapse='.'))
+    fname <- paste0(paste(per.target,collapse='_'),'_MP_',paste(per.type,collapse=''),if(GP) '_GP' else paste0('_MA',paste(Nmas,collapse='')),'proxy',paste(Inds,collapse='.'),if(adaptive) '_adaptive' else '')
     if(length(per.target)==1){
-        return(list(t=t,y=y,dy=dy,xx=x2,yy=y2,zz=z2,zz.rel=z2.rel,fname=fname,ypar=ypar))
+        return(list(t=t,y=y,dy=dy,xx=x2,yy=y2,zz=z2,zz.rel=z2.rel,fname=fname,ypar=ypar,tstart=mp$tstart,tend=mp$tend,adaptive=adaptive))
     }else{
-        return(list(t=t,y=y,dy=dy,xx=x2,yy=y2,zz=z2,zz.rel=z2.rel,subdata=subdata,idata=idata,fname=fname,ypar=ypar))
+        return(list(t=t,y=y,dy=dy,xx=x2,yy=y2,zz=z2,zz.rel=z2.rel,subdata=subdata,idata=idata,fname=fname,ypar=ypar,tstart=mp$tstart,tend=mp$tend,adaptive=adaptive))
     }
 }
 
@@ -1861,4 +2265,280 @@ show.peaks <- function(ps,powers,levels=NULL,Nmax=5){
       pos <- pos[1:Nmax]
     }
     return(cbind(pms,pos))
+}
+
+###########################################################################
+####Overall diagnosis of the signals in several RV data sets, after Feng et
+####al. (2020, ApJS 250, 29, Figs. 5-16): BFPs of the combined data with the
+####signals subtracted in sequence for several noise models (black), BFPs of
+####each data set (grey), BFPs of the activity indices and the window function
+####(blue), and the moving periodogram of the signal-only combined series. A
+####Keplerian signal should be significant, robust to the noise model, absent
+####from the activity indices, and consistent over time.
+diag.noise <- list(W=c(Nma=0,Nar=0),MA=c(Nma=1,Nar=0),AR=c(Nma=0,Nar=1),GP=c(Nma=0,Nar=0))
+diag.col <- list(combined='black',individual='grey45',proxy='#0072B2',window='#56B4E9',signal='#D55E00',rotation='#009E73')
+
+diagnose.signals <- function(data,sets,noise.models=c('W','MA','AR'),Nsig.max=3,ofac=1,frange=NULL,lnBF.min=5,
+                             SigType='circular',Nh=1,Ncores=1,Nwin=5,individual=TRUE,proxies=TRUE,moving=TRUE,progress=NULL,
+                             gp.Prot=NA,gp.tau=NA,adaptive=TRUE){
+###data: the named list of data tables; sets: the RV data sets to diagnose;
+###noise.models: any of 'W' (white), 'MA' (MA(1)), 'AR' (AR(1)) and 'GP' (the
+###SHO Gaussian process, with gp.Prot and gp.tau optionally fixed); the first
+###one also serves the individual sets, the activity indices are analysed
+###white. Returns the calc.1Dper() results of every part plus the accepted periods
+    sets <- sets[sets%in%names(data)]
+    if(length(sets)==0) stop('no data set selected')
+    noise.models <- noise.models[noise.models%in%names(diag.noise)]
+    if(length(noise.models)==0) noise.models <- 'W'
+    rv <- colnames(data[[sets[1]]])[2]
+    tspan <- diff(range(unlist(lapply(data[sets],function(x) x[,1]))))
+    if(is.null(frange)) frange <- c(1/tspan,1/2)
+    step <- function(msg) if(is.function(progress)) progress(msg)
+    base <- function(target,model,sequence,Nsig){
+        n <- length(target)
+        nm <- diag.noise[[model]]
+        list(ns=c(rv,'Window Function'),ofac=ofac,frange=frange,per.type='BFP',per.target=target,sequence=sequence,
+             Nmas=rep(as.integer(nm['Nma']),n),Nars=rep(as.integer(nm['Nar']),n),Inds=rep(list(0),n),Nsig.max=as.integer(Nsig),
+             per.type.seq='BFP',Niter=0,SigType=SigType,Nh=Nh,lnBF.min=lnBF.min,
+             noise.model=if(model=='GP') 'GP' else 'ARMA',gp.Prot=gp.Prot,gp.tau=gp.tau)
+    }
+    out <- list(sets=sets,rv=rv,noise.models=noise.models,lnBF.min=lnBF.min,Nsig.max=Nsig.max,tspan=tspan,frange=frange,
+                combined=list(),individual=list(),proxies=list(),moving=NULL)
+    for(m in noise.models){
+        step(paste0('combined data, ',m,' noise'))
+        pp <- base(sets,m,sequence=Nsig.max>1,Nsig=Nsig.max)
+        out$combined[[m]] <- calc.1Dper(Nmax.plots=50,vars=c(rv,'Window Function'),per.par=pp,data=data,Ncores=Ncores)
+    }
+    m1 <- noise.models[1]
+    if(individual && length(sets)>1){
+        for(s in sets){
+            step(paste0('data set ',s))
+            pp <- base(s,m1,sequence=FALSE,Nsig=1)
+            out$individual[[s]] <- calc.1Dper(Nmax.plots=50,vars=rv,per.par=pp,data=data,Ncores=Ncores)
+        }
+    }
+    if(proxies){
+        for(s in sets){
+            idx <- colnames(data[[s]])[-(1:3)]
+            if(length(idx)==0) next
+            step(paste0('activity indices of ',s))
+            pp <- base(s,'W',sequence=FALSE,Nsig=1)
+            pp$ns <- c(rv,idx,'Window Function')
+            out$proxies[[s]] <- calc.1Dper(Nmax.plots=50,vars=idx,per.par=pp,data=data,Ncores=Ncores)
+        }
+    }
+    mc <- out$combined[[m1]]$model.comp[[rv]]
+    out$model.comp <- mc
+    out$periods <- if(is.null(mc)) numeric(0) else mc$P[cumprod(as.logical(mc$accepted))==1]
+    if(moving && length(out$periods)>0){
+###one moving periodogram per accepted signal, on the signal-only combined
+###series with the other accepted signals subtracted (Feng et al. 2020, Fig. 5)
+        pp <- base(sets,'W',sequence=FALSE,Nsig=1)
+        pp$gp.Prot <- NA; pp$gp.tau <- NA
+        pp <- c(pp,list(files=NULL,Dt=signif(tspan/2,3),Nbin=as.integer(Nwin),alpha=5,scale=TRUE,
+                        pmin.zoom=1/frange[2],pmax.zoom=1/frange[1],show.signal=TRUE,use.fit=TRUE,adaptive=adaptive))
+        out$moving.par <- pp
+        out$moving <- list()
+        fit <- out$combined[[m1]]
+        ph <- fit$phase.list[[rv]]
+        for(k in seq_along(out$periods)){
+            step(paste0('moving periodogram of signal ',k))
+            others <- setdiff(seq_along(out$periods),k)
+            fitk <- fit
+            if(length(others)>0){
+                cols <- paste0('ysig_sig',others)
+                cols <- cols[cols%in%colnames(ph)]
+                if(length(cols)>0) fitk$phase.list[[rv]][,'y_all'] <- ph[,'y_all']-rowSums(ph[,cols,drop=FALSE])
+            }
+            out$moving[[k]] <- tryCatch(per2D.data(vars=rv,per.par=pp,data=data,fit1D=fitk),
+                                        error=function(e){ warning('moving periodogram of signal ',k,' failed: ',conditionMessage(e)); NULL })
+        }
+    }
+    out
+}
+
+diag.peak <- function(per,P0,tol=0.1){
+###the highest power of a periodogram matrix (P, power) within tol*P0 of P0
+    k <- which(abs(per[,1]-P0)<tol*P0)
+    if(length(k)==0) return(NA)
+    max(per[k,2],na.rm=TRUE)
+}
+
+diagnosis.table <- function(diag,tol=0.1){
+###one row per accepted signal of the first noise model: ln(BF) under every
+###noise model, robustness, overlap with activity indices and the window
+###function, time consistency from the moving periodogram, and a verdict
+    P <- diag$periods
+    if(length(P)==0) return(NULL)
+    thr <- diag$lnBF.min; rv <- diag$rv
+    rows <- list()
+    for(k in seq_along(P)){
+        row <- list(Signal=k,`Period [d]`=signif(P[k],5))
+###ln(BF) of the signal under each noise model (from the sequential search)
+        robust <- TRUE
+        for(m in diag$noise.models){
+            mc <- diag$combined[[m]]$model.comp[[rv]]
+            if(m==diag$noise.models[1]){
+                j <- k
+            }else{
+###the accepted signal of this noise model closest to the period, within tol
+                acc <- if(is.null(mc)) integer(0) else which(cumprod(as.logical(mc$accepted))==1 & abs(mc$P-P[k])<tol*P[k])
+                j <- if(length(acc)>0) acc[which.min(abs(mc$P[acc]-P[k]))] else integer(0)
+            }
+            v <- if(length(j)>0 && j<=nrow(mc)) mc$lnBF[j] else NA
+            row[[paste0('ln(BF) ',m)]] <- if(is.finite(v)) round(v,1) else NA
+            if(!(length(j)>0 && (is.na(v) || v>thr))) robust <- FALSE
+        }
+        row$`Robust to noise model` <- if(robust) 'yes' else 'no'
+###a period within tol of an earlier accepted signal is likely its alias or residual
+        near <- which(seq_along(P)<k & abs(P-P[k])<tol*P[k])
+###activity indices whose periodogram peaks within tol of the period
+        act <- c()
+        for(s in names(diag$proxies)){
+            pl <- diag$proxies[[s]]$per.list
+            for(idx in names(pl)){
+                if(idx=='Window Function') next
+                v <- diag.peak(pl[[idx]][,1:2],P[k],tol)
+                if(is.finite(v) && v>thr) act <- c(act,paste0(set.label(s),': ',idx))
+            }
+        }
+        row$`Activity overlap` <- if(length(act)>0) paste(act,collapse='; ') else 'none'
+###window function: is the sampling pattern's strongest peak at this period?
+        wf <- diag$combined[[1]]$per.list[['Window Function']]
+        wfp <- if(is.null(wf)) NA else wf[which.max(wf[,2]),1]
+        row$`Window function peak` <- if(is.finite(wfp) && abs(wfp-P[k])<tol*P[k]) 'yes' else 'no'
+###time consistency: windows of the moving periodogram in which the signal exceeds the threshold
+        tc <- NA
+        mv <- if(is.list(diag$moving) && length(diag$moving)>=k) diag$moving[[k]] else NULL
+        if(!is.null(mv) && is.matrix(mv$zz)){
+            zz <- mv$zz
+            if(nrow(zz)!=length(mv$yy) && ncol(zz)==length(mv$yy)) zz <- t(zz)
+            sel <- abs(mv$yy-P[k])<tol*P[k]
+###a malformed matrix (no window computed) leaves the test as n/a
+            if(nrow(zz)==length(mv$yy) && any(sel)){
+                pk <- apply(zz[sel,,drop=FALSE],2,function(z) suppressWarnings(max(z,na.rm=TRUE)))
+                ok <- is.finite(pk)
+                tc <- paste0(sum(pk[ok]>thr),'/',sum(ok),' windows')
+                row$tc.frac <- if(sum(ok)>0) sum(pk[ok]>thr)/sum(ok) else NA
+            }
+        }
+        row$`Consistent over time` <- if(is.na(tc)) 'n/a' else tc
+###verdict
+        v1 <- is.finite(row[[paste0('ln(BF) ',diag$noise.models[1])]]) && row[[paste0('ln(BF) ',diag$noise.models[1])]]>thr
+        verdict <- if(!v1) 'not significant' else if(!robust) 'depends on the noise model' else if(length(act)>0) 'possible activity' else 'candidate'
+        if(row$`Window function peak`=='yes') verdict <- paste0(verdict,'; at a window-function peak')
+        if(length(near)>0) verdict <- paste0(verdict,'; within ',round(100*tol),'% of signal ',near[1],' (alias or residual?)')
+        if(!is.null(row$tc.frac) && is.finite(row$tc.frac) && row$tc.frac<0.5 && P[k]<diag$tspan/2) verdict <- paste0(verdict,'; not consistent over time')
+        row$Verdict <- verdict
+        row$tc.frac <- NULL
+        rows[[k]] <- as.data.frame(row,check.names=FALSE,stringsAsFactors=FALSE)
+    }
+    do.call(rbind,rows)
+}
+
+diag.sections <- c(combined='Combined RV data: signals subtracted in sequence, one row per noise model (black)',
+                   individual='Individual RV data sets (grey)',
+                   proxy='Activity indices of each data set (blue)',
+                   window='Window function of the combined data: sampling aliases (light blue)')
+
+diagnosis.panels <- function(diag){
+###the list of periodogram panels of the diagnosis figure, grouped as in Feng
+###et al. (2020): the combined data per noise model and signal, the individual
+###data sets, the activity indices, the window function
+    rv <- diag$rv
+    panels <- list()
+    add <- function(per,title,kind,ylab='ln BF'){ panels[[length(panels)+1]] <<- list(per=per,title=title,kind=kind,ylab=ylab) }
+    for(m in diag$noise.models){
+        pl <- diag$combined[[m]]$per.list[[rv]]
+        if(is.null(pl)) next
+        for(j in 2:ncol(pl)){
+            k <- j-1
+            add(pl[,c(1,j)],paste0(m,' noise, ',if(k==1) 'all data' else paste0(k-1,' signal',if(k>2) 's' else '',' subtracted')),'combined')
+        }
+    }
+    for(s in names(diag$individual)){
+        pl <- diag$individual[[s]]$per.list[[rv]]
+        if(!is.null(pl)) add(pl[,1:2],paste0(set.label(s),' (',diag$noise.models[1],' noise)'),'individual')
+    }
+    for(s in names(diag$proxies)){
+        pl <- diag$proxies[[s]]$per.list
+        for(idx in names(pl)){
+            if(idx=='Window Function') next
+            add(pl[[idx]][,1:2],paste0(set.label(s),': ',idx),'proxy')
+        }
+    }
+    wf <- diag$combined[[1]]$per.list[['Window Function']]
+    if(!is.null(wf)) add(wf[,1:2],'window function (combined data)','window','Power')
+    panels
+}
+
+diagnosis.layout <- function(diag,ncol=3){
+###rows of the diagnosis figure: a short header row before each section and
+###the panel rows of that section; returns the relative row heights and the
+###sections present
+    panels <- diagnosis.panels(diag)
+    kinds <- sapply(panels,function(p) p$kind)
+    secs <- names(diag.sections)[names(diag.sections)%in%kinds]
+    heights <- c()
+    for(sname in secs){
+        ng <- sum(kinds==sname)
+        heights <- c(heights,0.22,rep(1,ceiling(ng/ncol)))
+    }
+    list(heights=heights,sections=secs,n=length(panels))
+}
+
+panel.header <- function(label,note=NULL){
+###a section header spanning the figure width
+    op <- par(mar=c(0.1,0.5,0.1,0.5),xpd=NA); on.exit(par(op))
+    plot.new(); plot.window(xlim=c(0,1),ylim=c(0,1))
+    rect(0,0.05,1,0.95,col='grey93',border=NA)
+    text(0.01,0.55,label,adj=c(0,0.5),font=2,cex=1.15)
+    if(!is.null(note)) text(0.99,0.55,note,adj=c(1,0.5),cex=0.85,col=pub.col$level)
+    invisible()
+}
+
+panel.diag <- function(p,periods=NULL,lnBF.min=5,Prot=NA,number=NULL,xlim=NULL){
+###one panel of the diagnosis figure
+    P <- p$per[,1]; pw <- p$per[,2]
+    ok <- is.finite(P) & is.finite(pw)
+    P <- P[ok]; pw <- pw[ok]
+    col <- diag.col[[p$kind]]
+    ylim <- range(c(pw,if(p$kind!='window') lnBF.min),na.rm=TRUE)
+    ylim[2] <- ylim[2]+0.12*diff(ylim)
+    if(is.null(xlim)) xlim <- range(P)
+    plot(P,pw,type='n',log='x',xaxt='n',yaxt='n',xlab='Period [day]',ylab=p$ylab,xlim=xlim,ylim=ylim,
+         main=paste0(if(!is.null(number)) paste0('(',number,') ') else '',p$title),cex.main=0.95)
+    pub.axes(xlog=TRUE)
+    if(length(periods)>0) abline(v=periods,col=diag.col$signal,lwd=1.2)
+    if(length(Prot)==1 && is.finite(Prot) && Prot>0) abline(v=Prot,col=diag.col$rotation,lty=3,lwd=1.5)
+    if(p$kind!='window') abline(h=lnBF.min,lty=2,col=pub.col$level)
+    lines(P,pw,col=col,lwd=if(p$kind=='combined') 1.4 else 1.1)
+    invisible()
+}
+
+diagnosis.plot <- function(diag,ncol=3,Prot=NA,pub=TRUE){
+###the diagnosis figure: the panels of each section under a header row, on a
+###grid of ncol columns; returns the number of periodogram panels drawn
+    panels <- diagnosis.panels(diag)
+    n <- length(panels)
+    if(n==0) return(invisible(0))
+    lay <- diagnosis.layout(diag,ncol)
+    xlim <- 1/rev(diag$frange)
+    grid.start(length(lay$heights),ncol,cex=if(ncol>2) 0.85 else 1,heights=lay$heights)
+    marks <- paste0('red: accepted periods',if(length(Prot)==1 && is.finite(Prot) && Prot>0) '; green dotted: rotation period' else '',
+                    '; dashed: ln(BF) = ',format(diag$lnBF.min,digits=3))
+    i <- 0
+    for(sname in lay$sections){
+        grid.next(ncol)
+        panel.header(diag.sections[[sname]],note=if(sname==lay$sections[1]) marks else NULL)
+        for(p in panels[sapply(panels,function(p) p$kind)==sname]){
+            i <- i+1
+            grid.next()
+            panel.diag(p,periods=diag$periods,lnBF.min=diag$lnBF.min,Prot=Prot,number=i,xlim=xlim)
+        }
+###a partly filled panel row: skip to the next row for the next header
+        k <- .fig.grid$k
+        if(k%%ncol!=0) .fig.grid$k <- k+(ncol-k%%ncol)
+    }
+    invisible(n)
 }

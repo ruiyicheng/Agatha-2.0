@@ -24,6 +24,9 @@ source('periodoframe.R')
 source("periodograms.R")
 source('functions.R',local=TRUE)
 source('mcmc_func.R')
+###like functions.R, sourced into the server's environment so that its plot
+###functions see the shared palette and style helpers
+source('nbody.R',local=TRUE)
 
 data.files <- list.files(path='data', pattern='\\.(dat|vels|rv)$', full.name=FALSE)
 
@@ -114,7 +117,13 @@ The BFP and MLP can be compared with the Lomb-Scargle periodogram (LS), the gene
 
     output$Nsig.max <- renderUI({
         if(is.null(input$sequence)) return()
-        if(input$sequence) sliderInput("Nsig.max", "Maximum number of signals", min = 2, max = 10,value=2,step=1)
+        if(input$sequence){
+            tagList(
+                sliderInput("Nsig.max", "Maximum number of signals", min = 2, max = 10,value=2,step=1),
+                numericInput('lnBF.min','ln(BF) a further signal must exceed to be accepted',value=5,min=0,max=100,step=0.5),
+                helpText('Signals are added one at a time and compared with the model without them (BIC-estimated ln(BF); from the joint MCMC of all signals for a single data set when MCMC is on, otherwise from the periodogram). The search stops at the first signal below the threshold; the most plausible number of signals is the number accepted, at most the maximum.')
+            )
+        }
     })
 
     output$noise.model <- renderUI({
@@ -224,7 +233,21 @@ The BFP and MLP can be compared with the Lomb-Scargle periodogram (LS), the gene
 #        if(!is.null(data())){
         if(any(input$per.type=='BFP')){
             choices <- c(0,100,1000,10000,100000,1000000)
-            selectizeInput('Niter','MCMC sample size', choices=choices,selected=0,multiple=FALSE)
+            tagList(
+                selectizeInput('Niter','MCMC sample size', choices=choices,selected=0,multiple=FALSE),
+###eccentricity prior of the MCMC; only meaningful for Keplerian signals
+                conditionalPanel("input.Niter > 0 && input['signal.type'] == 'kepler'",
+                    radioButtons('e.prior','Eccentricity prior of the MCMC',
+                                 c('Beta distribution (Kipping 2013)'='beta','Uniform'='uniform','Half-Gaussian'='halfgauss'),selected='beta'),
+                    conditionalPanel("input['e.prior'] == 'beta'",
+                        fluidRow(column(6,numericInput('e.beta.a','Beta shape a',value=0.867,min=0.01,max=20,step=0.01)),
+                                 column(6,numericInput('e.beta.b','Beta shape b',value=3.03,min=0.01,max=20,step=0.01))),
+                        helpText('Beta(a, b) with a=0.867 and b=3.03 is the eccentricity distribution of RV planets found by Kipping (2013, MNRAS 434, L51).')),
+                    conditionalPanel("input['e.prior'] == 'halfgauss'",
+                        numericInput('e.sigma','Sigma of the half-Gaussian',value=0.1,min=0.001,max=1,step=0.01),
+                        helpText('Half-Gaussian on e >= 0: the density of a Gaussian of zero mean and the given sigma, folded onto positive eccentricities.'))
+                )
+            )
         }
     })
 
@@ -256,7 +279,8 @@ The BFP and MLP can be compared with the Lomb-Scargle periodogram (LS), the gene
     output$per.type2 <- renderUI({
         if(is.null(Ntarget2())) return()
         if(Ntarget2()>1){
-            selectInput("per.type2",'Periodogram type', choices='MLP',selected="MLP",multiple=FALSE)
+###one type at a time for combined sets (the combined series is analysed white)
+            selectInput("per.type2",'Periodogram type',choices=c('BFP','MLP','GLST','BGLS','GLS','LS'),selected="MLP",multiple=FALSE)
         }else{
             selectInput("per.type2",'Periodogram type',
                         choices=c('BFP','MLP','GLST','BGLS','GLS','LS'),selected="MLP",multiple=TRUE)
@@ -675,6 +699,11 @@ The BFP and MLP can be compared with the Lomb-Scargle periodogram (LS), the gene
       }else{
           vals$Niter <- 0
       }
+      vals$lnBF.min <- suppressWarnings(as.numeric(iget('lnBF.min',5)))
+      vals$e.prior <- list(type=iget('e.prior','beta'),
+                           a=suppressWarnings(as.numeric(iget('e.beta.a',0.867))),
+                           b=suppressWarnings(as.numeric(iget('e.beta.b',3.03))),
+                           sigma=suppressWarnings(as.numeric(iget('e.sigma',0.1))))
       vals$Nh <- as.integer(iget('Nh',1))
       vals$noise.model <- if(is.null(input$noise.model)) 'ARMA' else input$noise.model
       vals$gp.Prot <- if(is.null(input$gp.Prot)) NA else suppressWarnings(as.numeric(input$gp.Prot))
@@ -707,6 +736,8 @@ The BFP and MLP can be compared with the Lomb-Scargle periodogram (LS), the gene
           vals <- c(vals,Nmas=0,Nars=0,Inds=0)
       }
       vals <- c(vals,Dt=signif(tspan()*as.numeric(input$Dt),3),Nbin=as.integer(input$Nbin),alpha=as.integer(input$alpha),scale=input$scale,pmin.zoom=input$range.zoom[1],pmax.zoom=input$range.zoom[2],show.signal=input$show.signal)
+      vals$use.fit <- isTRUE(input$use.fit)
+      vals$adaptive <- isTRUE(input$adaptive2)
       vals$noise.model <- if(is.null(input$noise.model2)) 'ARMA' else input$noise.model2
       vals$gp.Prot <- if(is.null(input$gp.Prot2)) NA else suppressWarnings(as.numeric(input$gp.Prot2))
       vals$gp.tau <- if(is.null(input$gp.tau2)) NA else suppressWarnings(as.numeric(input$gp.tau2))
@@ -1087,7 +1118,7 @@ output$color <- renderUI({
       content = function(file) {
         pdf(file,8,8)
         per1D.plot(data1D()$per.list,data1D()$tits,data1D()$pers,data1D()$levels,ylabs=data1D()$ylabs,download=TRUE,SigType=input$signal.type,par.list=data1D()$par.list)
-        phase1D.plot(data1D()$phase.list,data1D()$sim.list,data1D()$tits,download=TRUE,repar=FALSE)
+        phase1D.plot(data1D()$phase.list,data1D()$sim.list,data1D()$tits,download=TRUE,repar=FALSE,par.list=data1D()$par.list,model.comp=data1D()$model.comp)
         dev.off()
       })
 
@@ -1097,7 +1128,7 @@ output$color <- renderUI({
         },
       content = function(file){
         pdf(file,8,8)
-        phase1D.plot(data1D()$phase.list,data1D()$sim.list,data1D()$tits,download=TRUE)
+        phase1D.plot(data1D()$phase.list,data1D()$sim.list,data1D()$tits,download=TRUE,par.list=data1D()$par.list,model.comp=data1D()$model.comp)
         dev.off()
       })
 
@@ -1156,15 +1187,41 @@ output$color <- renderUI({
 
     output$combined <- renderPlot({
         if(is.null(data1D())) return()
-        combined.plot(data1D()$per.list,data1D()$phase.list,data1D()$sim.list,data1D()$tits,data1D()$pers,data1D()$levels,data1D()$ylabs,SigType=input$signal.type,par.list=data1D()$par.list)
+        combined.plot(data1D()$per.list,data1D()$phase.list,data1D()$sim.list,data1D()$tits,data1D()$pers,data1D()$levels,data1D()$ylabs,SigType=input$signal.type,par.list=data1D()$par.list,model.comp=data1D()$model.comp)
     })
 
     output$plot.1Dcombined <- renderUI({
         plotOutput("combined", width = "750px", height = 400*ceiling(Nmax.plots/2))
     })
 
+###the signal-only series of the 1D fit (offsets, trend and red noise removed)
+###as the input of the moving periodogram, once a 1D fit exists for the same sets
+    fit1D.sets <- function(){
+        d <- tryCatch(data1D(),error=function(e) NULL)
+        if(is.null(d) || length(d$phase.list)==0) return(NULL)
+        sets <- attr(d$phase.list[[1]],'sets')
+        if(is.null(sets)) return(NULL)
+        sets
+    }
+    output$use.fit2 <- renderUI({
+        if(is.null(input$per.target2)) return()
+        sets <- fit1D.sets()
+        if(is.null(sets)){
+            return(helpText('Compute a 1D periodogram (with or without MCMC) for these data sets to enable the moving periodogram of the signal-only data: the sets combined after removing the offsets, the trend and the red noise of that fit, which extends the baseline for testing the time consistency of long-period signals.'))
+        }
+        ok <- setequal(sets,input$per.target2)
+        tagList(
+            checkboxInput('use.fit','Use the signal-only data of the 1D fit (offsets, trend and red noise removed)',value=FALSE),
+            helpText(if(ok){
+                'The data sets are combined after subtracting the per-set offsets, the trend and the red-noise model of the 1D fit (the MCMC solution when MCMC was run), so only the potential signals and white noise remain. The noise settings above are then ignored.'
+            }else{
+                paste0('The 1D fit was made for ',paste(sets,collapse=', '),'; select the same data sets here to use it.')
+            })
+        )
+    })
+
   MP.data <- eventReactive(input$data.update,{
-      tryCatch(per2D.data(periodogram.var2(),per.par2(),data()),
+      tryCatch(per2D.data(periodogram.var2(),per.par2(),data(),fit1D=if(isTRUE(input$use.fit)) data1D() else NULL),
                error=function(e){
                    showNotification(paste('2D periodogram calculation failed:',conditionMessage(e)),type='error',duration=NULL)
                    NULL
@@ -1194,6 +1251,302 @@ output$color <- renderUI({
     output$download.MP.data <- renderUI({
         if(is.null(MP.data())) return()
         downloadButton('MP.data', 'Download data of 2D periodogram')
+    })
+
+###################################################################
+####N-body stability tab
+    nbody.avail <- reactive({
+        input$nbody.python
+        nbody.python(if(is.null(input$nbody.python) || !nzchar(input$nbody.python)) 'python3' else input$nbody.python)
+    })
+
+    output$nbody.engine <- renderUI({
+        ver <- nbody.avail()
+        tagList(
+            radioButtons('nbody.engine','Integrator',
+                         choices=if(!is.null(ver)) c('REBOUND WHFast (Python, long-term)'='rebound','Leapfrog in R (short-term)'='R') else c('Leapfrog in R (short-term)'='R'),
+                         selected=if(!is.null(ver)) 'rebound' else 'R'),
+            helpText(if(!is.null(ver)) paste0('REBOUND ',ver,' found. Integrations of ~10 Myr are only practical with it.') else
+                     'REBOUND was not found for this Python interpreter (install with: python3 -m pip install --user "rebound<5"); only the short-term R integrator is available.')
+        )
+    })
+
+    nbody.orbits <- reactive({
+###the planets of the current 1D solution (RV) for the chosen stellar mass and inclination
+        d <- tryCatch(data1D(),error=function(e) NULL)
+        if(is.null(d) || is.null(d$par.list) || length(d$par.list)==0) return(NULL)
+        ypar <- names(d$par.list)[1]
+        smp <- tryCatch(nbody.samples(d,ypar,N=0),error=function(e) NULL)
+        if(is.null(smp)) return(NULL)
+        list(ypar=ypar,nominal=smp$nominal,orb=rv2orbits(smp$nominal,Mstar=as.numeric(input$nbody.Mstar),inc=as.numeric(input$nbody.inc)))
+    })
+
+    output$nbody.source <- renderUI({
+        o <- nbody.orbits()
+        if(is.null(o) || is.null(o$orb)) return(helpText('Compute a 1D periodogram with a Keplerian (or circular) signal first; its fitted parameters (the MAP of the MCMC when it ran) define the planets.'))
+        n <- nrow(o$orb)
+        helpText(paste0(n,' planet',if(n>1) 's' else '',' from the 1D fit of ',o$ypar,': P = ',paste(signif(o$orb$P,4),collapse=', '),' d; ',
+                        'a = ',paste(signif(o$orb$a,3),collapse=', '),' AU; m sin i = ',paste(signif(o$orb$msini,3),collapse=', '),' Mjup. ',
+                        'Planet masses follow from the inclination (coplanar orbits).'))
+    })
+
+    output$nbody.estimate <- renderUI({
+        o <- nbody.orbits()
+        if(is.null(o) || is.null(o$orb)) return()
+        Pmin <- min(o$orb$P)/365.25
+        steps <- as.numeric(input$nbody.tmax)/(Pmin/as.numeric(input$nbody.steps))
+        nsys <- 1+(if(identical(input$nbody.mode,'mc')) as.integer(input$nbody.N) else 0)
+        rate <- if(identical(input$nbody.engine,'rebound')) 5e6 else 5e3
+        helpText(paste0('About ',format(signif(steps,2),big.mark=',',scientific=TRUE),' steps per system (',nsys,' system',if(nsys>1) 's' else '','); roughly ',
+                        signif(steps*nsys/rate/60,2),' minutes at ',format(rate,big.mark=','),' steps per second.'))
+    })
+
+    output$nbody.table <- renderTable({
+        o <- nbody.orbits(); if(is.null(o) || is.null(o$orb)) return(NULL)
+        tab <- o$orb[,c('signal','P','K','e','omega','Mo','a','msini','m')]
+        colnames(tab) <- c('Signal','P [d]','K [m/s]','e','omega [rad]','Mo [rad]','a [AU]','m sin i [Mjup]','m [Msun]')
+        tab
+    },digits=4,caption='Planets of the orbital solution',caption.placement='top')
+
+    output$nbody.amd <- renderTable({
+        o <- nbody.orbits(); if(is.null(o) || is.null(o$orb) || nrow(o$orb)<2) return(NULL)
+        tab <- amd.stability(o$orb,Mstar=as.numeric(input$nbody.Mstar))
+        tab$AMD.stable <- ifelse(tab$AMD.stable,'yes','no'); tab$Hill.stable <- ifelse(tab$Hill.stable,'yes','no')
+        colnames(tab) <- c('Pair','a inner [AU]','a outer [AU]','Relative AMD','Critical (collision)','Critical (Hill)','AMD ratio','Separation [mutual Hill radii]','AMD-stable','Hill-stable (> 2 sqrt 3)')
+        tab
+    },digits=3,caption='Analytical criteria for adjacent pairs (nominal orbits)',caption.placement='top')
+
+###the integration runs in a separate process (nbody.launch), so the app
+###stays responsive, the progress is read from the job's progress file, and
+###the run can be stopped
+    nbody.rv <- reactiveValues(job=NULL,result=NULL,message=NULL,bar=NULL)
+
+    observeEvent(input$nbody.go,{
+        if(!is.null(nbody.rv$job)){ showNotification('An integration is already running; stop it first.',type='warning'); return() }
+        o <- nbody.orbits()
+        if(is.null(o) || is.null(o$orb)){ showNotification('No orbital solution: compute a 1D periodogram first.',type='error'); return() }
+        d <- data1D()
+        Mstar <- as.numeric(input$nbody.Mstar); inc <- as.numeric(input$nbody.inc)
+        N <- if(identical(input$nbody.mode,'mc')) as.integer(input$nbody.N) else 0
+        smp <- nbody.samples(d,o$ypar,N=N,seed=1)
+        pars <- c(list(smp$nominal),smp$samples)
+        orbit.list <- lapply(pars,function(p) rv2orbits(p,Mstar=Mstar,inc=inc))
+        settings <- list(Mstar=Mstar,tmax=as.numeric(input$nbody.tmax),steps.per.orbit=as.numeric(input$nbody.steps),
+                         Nout=as.integer(input$nbody.Nout),escape.factor=as.numeric(input$nbody.escape),encounter.hill=as.numeric(input$nbody.hill),
+                         engine=if(is.null(input$nbody.engine)) 'R' else input$nbody.engine,
+                         python=if(nzchar(input$nbody.python)) input$nbody.python else 'python3',
+                         a.tol=as.numeric(input$nbody.atol),method=smp$method)
+        nbody.rv$result <- NULL; nbody.rv$message <- NULL
+        job <- tryCatch(nbody.launch(orbit.list,settings),error=function(e){ showNotification(paste('could not start the integration:',conditionMessage(e)),type='error'); NULL })
+        if(is.null(job)) return()
+        bar <- shiny::Progress$new(); bar$set(message='Integrating the orbits',value=0,detail='starting')
+        nbody.rv$bar <- bar
+        nbody.rv$job <- job
+    })
+
+    observeEvent(input$nbody.stop,{
+        job <- nbody.rv$job
+        if(is.null(job)){ showNotification('No integration is running.',type='message'); return() }
+        nbody.stop(job)
+        if(!is.null(nbody.rv$bar)){ nbody.rv$bar$close(); nbody.rv$bar <- NULL }
+        nbody.rv$message <- paste0('Integration stopped by the user after ',format(round(as.numeric(difftime(Sys.time(),job$started,units='secs')))),' s.')
+        nbody.rv$job <- NULL
+    })
+
+    observe({
+        job <- nbody.rv$job
+        if(is.null(job)) return()
+        invalidateLater(1000)
+        st <- nbody.status(job)
+        if(!st$done){
+            if(!is.null(nbody.rv$bar)){
+                frac <- if(st$n>0) (max(st$i,1)-1+st$frac)/st$n else 0
+                nbody.rv$bar$set(value=frac,detail=paste0('system ',max(st$i,1),' of ',st$n,': ',round(100*st$frac),'% of the integration time; ',
+                                                          format(round(as.numeric(difftime(Sys.time(),job$started,units='secs')))),' s elapsed'))
+            }
+            return()
+        }
+        if(!is.null(nbody.rv$bar)){ nbody.rv$bar$close(); nbody.rv$bar <- NULL }
+        if(!is.null(st$error) || is.null(st$result)){
+            nbody.rv$message <- paste('N-body integration failed:',if(is.null(st$error)) 'no result was written' else st$error)
+            showNotification(nbody.rv$message,type='error',duration=NULL)
+        }else{
+            nbody.rv$result <- st$result
+            nbody.rv$message <- paste0('Finished in ',format(round(as.numeric(difftime(Sys.time(),job$started,units='secs')))),' s.')
+        }
+        nbody.rv$job <- NULL
+    })
+
+    nbody.result <- reactive({ nbody.rv$result })
+
+    output$nbody.progress <- renderUI({
+        if(!is.null(nbody.rv$job)) return(helpText(HTML('<b>Integration running</b> - see the progress bar; press Stop to abort.')))
+        if(!is.null(nbody.rv$message)) helpText(nbody.rv$message)
+    })
+
+    output$nbody.summary <- renderUI({
+        r <- nbody.result(); if(is.null(r)) return()
+        cls <- r$class
+        nom <- cls[1,]
+        tagList(h4(paste0('Nominal solution: ',nom$status,if(!nom$stable) paste0(' at ',signif(nom$t.end,3),' yr') else paste0(' over ',format(r$tmax,big.mark=','),' yr'))),
+                helpText(paste0(r$run$engine,'; ',r$method,'. Energy error of the nominal run: ',signif(nom$dE,2),
+                                '. A system is unstable at an escape, a close encounter within the chosen number of mutual Hill radii, a drift of a semi-major axis beyond the tolerance, or e > 0.9.')),
+                if(nrow(cls)>1) h4(paste0(sum(cls$stable[-1]),' of ',nrow(cls)-1,' sampled systems stable')))
+    })
+
+    output$nbody.results <- renderTable({
+        r <- nbody.result(); if(is.null(r)) return(NULL)
+        cls <- r$class
+        cls$system <- c('nominal',if(nrow(cls)>1) paste('sample',seq_len(nrow(cls)-1)))
+        cls$stable <- ifelse(cls$stable,'yes','no')
+        colnames(cls) <- c('System','Status','End time [yr]','max |da/a|','max e','Energy error','Stable')
+        cls
+    },digits=3,caption='Integrated systems',caption.placement='top')
+
+    output$nbody.plot <- renderPlot({
+        r <- nbody.result(); if(is.null(r)) return()
+        nbody.plot(r$run,r$orbit.list,system=1,main=paste0('Nominal solution (',r$run$engine,')'))
+    })
+
+    output$nbody.mcplot <- renderPlot({
+        r <- nbody.result(); if(is.null(r) || nrow(r$class)<2) return()
+        nbody.mc.plot(r$class[-1,],r$tmax,main=r$method)
+    })
+
+    output$plot.nbody <- renderUI({
+        r <- nbody.result(); if(is.null(r)) return()
+        tagList(plotOutput('nbody.plot',width='700px',height='650px'),
+                if(nrow(r$class)>1) plotOutput('nbody.mcplot',width='700px',height='400px'))
+    })
+
+    output$nbody.download <- downloadHandler(
+        filename = function() 'nbody_stability.csv',
+        content = function(file){ r <- nbody.result(); write.csv(r$class,file,row.names=FALSE) })
+    output$nbody.tracks <- downloadHandler(
+        filename = function() 'nbody_tracks.csv',
+        content = function(file){ r <- nbody.result(); write.csv(r$run$tracks,file,row.names=FALSE) })
+    output$download.nbody <- renderUI({
+        if(is.null(nbody.result())) return()
+        tagList(downloadButton('nbody.download','Download the stability table (CSV)'),downloadButton('nbody.tracks','Download a(t), e(t) of every run (CSV)'))
+    })
+
+###################################################################
+####Signal diagnosis tab
+    output$per.target3 <- renderUI({
+        if(is.null(data())) return(helpText('Upload or select the data sets first.'))
+        selectizeInput('per.target3','RV data sets to diagnose',choices=names(data()),selected=names(data()),multiple=TRUE)
+    })
+
+    diag <- eventReactive(input$diagnose,{
+        if(is.null(data()) || is.null(input$per.target3) || length(input$per.target3)==0){
+            showNotification('Select at least one data set.',type='error'); return(NULL)
+        }
+        sets <- input$per.target3
+        noise <- if(is.null(input$noise3)) 'W' else input$noise3
+        nsteps <- length(noise)+(if(isTRUE(input$individual3) && length(sets)>1) length(sets) else 0)+
+                  (if(isTRUE(input$proxies3)) length(sets) else 0)+(if(isTRUE(input$moving3)) 1 else 0)
+        prange <- 10^input$prange3
+        tryCatch(
+            withProgress(message='Diagnosing the signals',value=0,{
+                diagnose.signals(data(),sets,noise.models=noise,Nsig.max=as.integer(input$Nsig3),ofac=as.numeric(input$ofac3),
+                                 frange=c(1/prange[2],1/prange[1]),lnBF.min=as.numeric(input$lnBF.min3),SigType=input$SigType3,
+                                 Nh=if(input$SigType3=='kepler') 2 else 1,Ncores=1,Nwin=as.integer(input$Nwin3),
+                                 individual=isTRUE(input$individual3),proxies=isTRUE(input$proxies3),moving=isTRUE(input$moving3),
+                                 gp.Prot=suppressWarnings(as.numeric(input$gp.Prot3)),gp.tau=suppressWarnings(as.numeric(input$gp.tau3)),
+                                 adaptive=isTRUE(input$adaptive3),
+                                 progress=function(msg) incProgress(1/max(nsteps,1),detail=msg))
+            }),
+            error=function(e){
+                showNotification(paste('Signal diagnosis failed:',conditionMessage(e)),type='error',duration=NULL)
+                NULL
+            })
+    })
+
+    output$diag.text <- renderUI({
+        d <- diag()
+        if(is.null(d)) return()
+        n <- length(d$periods)
+        tagList(h4(paste0('Signals in ',paste(set.label(d$sets),collapse=' + '),' (',d$noise.models[1],' noise): ',n,' accepted')),
+                helpText(paste0('Accepted periods: ',if(n>0) paste(signif(d$periods,5),collapse=', ') else 'none',
+                                ' d. The table applies the criteria of Feng et al. (2020): ln(BF) > ',d$lnBF.min,
+                                ' under every noise model, no activity index peaking within 10 per cent of the period, and the signal above the threshold in most windows of the moving periodogram (the time-consistency test is not applied to periods longer than half the time span).')))
+    })
+
+    output$diag.summary <- renderTable({
+        d <- diag(); if(is.null(d)) return(NULL)
+        diagnosis.table(d)
+    },digits=1,caption='Diagnosis of the accepted signals',caption.placement='top')
+
+    output$diag.plot <- renderPlot({
+        d <- diag(); if(is.null(d)) return()
+        diagnosis.plot(d,ncol=as.integer(input$ncol3),Prot=suppressWarnings(as.numeric(input$Prot3)))
+    })
+
+    output$plot.diag <- renderUI({
+        d <- diag(); if(is.null(d)) return()
+        nc <- as.integer(input$ncol3); lay <- diagnosis.layout(d,nc)
+        plotOutput('diag.plot',width='900px',height=paste0(round(240*sum(lay$heights)),'px'))
+    })
+
+    observeEvent(diag(),{
+        d <- diag(); if(is.null(d) || length(d$moving)==0) return()
+        for(k in seq_along(d$moving)){
+            local({
+                kk <- k
+                output[[paste0('diag.mp',kk)]] <- renderPlot({
+                    if(is.null(d$moving[[kk]])) return()
+                    plotMP(d$moving[[kk]],d$moving.par)
+                })
+            })
+        }
+    })
+
+    output$plot.diag.mp <- renderUI({
+        d <- diag(); if(is.null(d) || length(d$moving)==0) return()
+        items <- lapply(seq_along(d$moving),function(k){
+            if(is.null(d$moving[[k]])) return(NULL)
+            tagList(h5(paste0('Signal ',k,' (P = ',signif(d$periods[k],5),' d)')),plotOutput(paste0('diag.mp',k),width='600px',height='600px'))
+        })
+        tagList(h4('Moving periodograms of the signal-only combined series'),
+                helpText('For each accepted signal: the data sets combined after removing the per-set offsets, trend and red noise of the combined fit, and the other accepted signals subtracted; a real signal stays at the same period in every window.'),
+                items)
+    })
+
+    output$diag.figure <- downloadHandler(
+        filename = function() paste0(paste(diag()$sets,collapse='_'),'_diagnosis.pdf'),
+        content = function(file){
+            d <- diag(); nc <- as.integer(input$ncol3)
+            lay <- diagnosis.layout(d,nc)
+            pdf(file,width=3.3*nc,height=2.9*sum(lay$heights))
+            diagnosis.plot(d,ncol=nc,Prot=suppressWarnings(as.numeric(input$Prot3)))
+            for(mv in d$moving) if(!is.null(mv)) plotMP(mv,d$moving.par)
+            dev.off()
+        })
+
+    output$diag.table <- downloadHandler(
+        filename = function() paste0(paste(diag()$sets,collapse='_'),'_diagnosis.csv'),
+        content = function(file) write.csv(diagnosis.table(diag()),file,row.names=FALSE)
+    )
+
+    output$download.diag <- renderUI({
+        if(is.null(diag())) return()
+        tagList(downloadButton('diag.figure','Download the diagnosis figure (PDF)'),
+                downloadButton('diag.table','Download the diagnosis table (CSV)'))
+    })
+
+    output$MP.series <- downloadHandler(
+        filename = function() paste0(MP.data()$fname,'_series.txt'),
+        content = function(file){
+            v <- MP.data()
+            tab <- data.frame(Time=v$t,y=v$y,ey=v$dy,set=if(is.null(v$set)) rep(paste(v$ypar),length(v$t)) else v$set)
+            colnames(tab)[2:3] <- c(v$ypar,paste0('e',v$ypar))
+            write.table(tab,file,quote=FALSE,row.names=FALSE)
+        }
+    )
+
+    output$download.MP.series <- renderUI({
+        if(is.null(MP.data()) || !isTRUE(MP.data()$signal.only)) return()
+        downloadButton('MP.series', 'Download the combined signal-only series')
     })
 
   observeEvent(input$plot2D,{

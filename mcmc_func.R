@@ -945,6 +945,17 @@ tjar <- function(t=trv,x=Sindex[,1],phi.sab,alpha.sab,psi.sab,par.tj=1,symmetry=
     }
     return(rv.tjar)
 }
+eprior.logfun <- function(e){
+###log prior of the eccentricity: the prior chosen for the fit (e.prior, set
+###by mcfit()) when one is defined, else the historical half-Gaussian of scale
+###Esd, so that the standalone scripts keep their behaviour
+    if(exists('e.prior') && exists('eprior.log')){
+        eprior.log(e,e.prior)
+    }else{
+        log(2*dnorm(e,mean=0,sd=Esd))
+    }
+}
+
 prior.func <- function(pars,bases=rep('natural',10)){
     logprior <- 0
     npar <- names(pars)
@@ -962,7 +973,7 @@ prior.func <- function(pars,bases=rep('natural',10)){
                 logprior <- logprior + log(1/(par.max[indK]-par.min[indK]))
                 if(length(inde)>0){
                     e <- pars[inde]
-                    logprior <- logprior + log(2*dnorm(e,mean=0,sd=Esd))#normalized semi-Gaussian distribution
+                    logprior <- logprior + eprior.logfun(e)
                 }
                 Mo <- pars[indMo]
                 logprior <- logprior + log(1/(par.max[indMo]-par.min[indMo]))
@@ -994,7 +1005,7 @@ prior.func <- function(pars,bases=rep('natural',10)){
                 logprior <- logprior+ log(1/(par.max[indK]-par.min[indK]))
 ###non-uniform prior for linear2 parameterization
                 e <- pars[indsw]^2+pars[indcw]^2
-                logprior <- logprior+ log(2*dnorm(e,mean=0,sd=Esd))
+                logprior <- logprior+ eprior.logfun(e)
 #                logprior <- logprior+ log(1/(par.max[indsw]-par.min[indsw]))
 #                logprior <- logprior+ log(1/(par.max[indcw]-par.min[indcw]))
             }

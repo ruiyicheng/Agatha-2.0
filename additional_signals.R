@@ -5,8 +5,21 @@ leg.pos <- 'topright'
 ####find additional signals
 ############################
 #save(list=ls(all=TRUE),file='test3.Robj')
+###a further signal is searched only while the previous one was accepted by
+###the model comparison (ln(BF) > lnBF.min); the periodogram of the first
+###rejected signal is still reported. With a single data set the accepted
+###signals are refined together by a joint MCMC after each addition, and the
+###ln(BF) compares the joint models (BIC estimate from the maximum likelihood of
+###the MCMC); with several data sets each signal has its own MCMC in the
+###residual and the ln(BF) comes from the residual periodogram
+joint <- mcf && !multi.set
+if(!exists('lnBF.min')) lnBF.min <- 5
 for(jj in 2:Nsig.max){
+    if(!is.null(model.comp) && !all(model.comp$accepted)) break
     cat('\n Find signal ',jj,'!\n')
+###the next signal is searched in the data minus the previous signal as fitted
+###by sigfit(): with MCMC that is the signal of the maximum-likelihood sample
+###(res.s = data - MAP signal), otherwise the periodogram's own optimum
     if(any(names(rv.ls)=='res.s')){
         res <- as.numeric(rv.ls$res.s)
     }else{
@@ -71,10 +84,34 @@ for(jj in 2:Nsig.max){
     }
     cnames <- c(cnames,paste0(per.type.seq,jj,'signal:',ypar,':',name))
     ylabs <- c(ylabs,ylab)
+    lnBF.per <- if(per.type.seq=='BFP') suppressWarnings(max(rv.ls$power,na.rm=TRUE)) else NA
+    if(!is.finite(lnBF.per)) lnBF.per <- NA
 ###modify the periodogram output for Keplerian fit
-    tmp <- sigfit(per=rv.ls,data=cbind(t,rr,dy),SigType=SigType,basis=basis,mcf=mcf)
+    tmp <- sigfit(per=rv.ls,data=cbind(t,rr,dy),SigType=SigType,basis=basis,mcf=mcf,Niter=Niter,Ncores=Ncores,Pconv=Pconv,
+                  e.prior=if(exists('e.prior')) e.prior else NULL)
     rv.ls <- tmp$per
 #    if(!progress) phase.plot(tmp,fold=fold)
+    par.new <- addpar(par.data,tmp$ParSig,jj)
+    lnBF <- lnBF.per; lnBF.source <- 'periodogram'
+    fitj <- NULL
+    if(joint){
+###joint MCMC of all signals so far, started from the previous joint solution
+###plus the new signal; ln(BF) = difference of the maximum log likelihoods
+###minus (extra parameters / 2) ln N
+        fitj <- mcfit(rv.ls,data=tab[,1:3],tsim=fit$tsim0,Niter=Niter,SigType=SigType,basis=basis,ParSig=par.P2per(par.new),Pconv=TRUE,Ncores=Ncores,
+                      e.prior=if(exists('e.prior')) e.prior else NULL)
+        if(is.finite(llmax.prev) && is.finite(fitj$llmax)){
+            dk <- length(fitj$ParSig)-length(par.prev)
+            lnBF <- as.numeric(fitj$llmax-llmax.prev-dk/2*log(length(t)))
+            lnBF.source <- 'MCMC'
+        }
+    }
+    accepted <- is.na(lnBF) || lnBF>lnBF.min
+    if(!is.null(model.comp)){
+        model.comp <- rbind(model.comp,data.frame(n=jj,P=as.numeric(tmp$popt)[1],lnBF=lnBF,source=lnBF.source,accepted=accepted,stringsAsFactors=FALSE))
+    }
+    cat(' Signal ',jj,': ln(BF) = ',format(lnBF,digits=3),' (',lnBF.source,'); ',if(accepted) 'accepted' else 'rejected','\n',sep='')
+    if(!accepted) break
 
     pp <- cbind(tmp$t,tmp$y,tmp$ysig0)
     colnames(pp) <- paste0(c('t','y','ysig'),'_sig',jj)
@@ -83,7 +120,18 @@ for(jj in 2:Nsig.max){
     qq <- cbind(tmp$tsim,tmp$ysim,tmp$ysim0)
     colnames(qq) <- paste0(c('tsim','ysim','ysim0'),'_sig',jj)
     sim.data <- cbind(sim.data,qq)
-    par.data <- addpar(par.data,tmp$ParSig,jj)
+    par.data <- par.new
+    res.last <- tmp$res
+    if(exists('par.stat.data')) par.stat.data <- addpar.stat(par.stat.data,tmp$par.stat,jj,keep=names(tmp$ParSig))
+    if(!is.null(fitj)){
+        joint.fit <- fitj
+        llmax.prev <- fitj$llmax
+        par.prev <- fitj$ParSig
+        par.data <- fitj$ParSig
+###the next signal is searched in the data minus all jointly refined signals
+        rv.ls$res.s <- fitj$res.sig
+        res.last <- fitj$res
+    }
 ###    phase.plot(tmp)
 }
 

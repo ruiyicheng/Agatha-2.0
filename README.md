@@ -72,6 +72,15 @@ These are HARPS RV time series fetched with `dace-query` and saved in Agatha's t
 
 ### Basic app workflow
 
+**Which tabs depend on which.** Every tab needs the data sets loaded in `Choose File`.
+`Scatter Plot`, `Model Comparison`, `1D Periodogram` and `Signal Diagnosis` are otherwise
+independent of one another. `2D Periodogram` works on the raw data, except for its optional
+signal-only mode, which needs a `1D Periodogram` result for the same data sets. `N-body
+Stability` always needs a `1D Periodogram` result: it integrates the signals fitted there (the
+MAP of the MCMC when MCMC ran) and samples that run's MCMC. The diagnosis does not feed the
+N-body tab, so when the diagnosis rejects a signal, re-run the 1D tab with matching settings
+before the N-body test. The same notes appear in bold at the top of each tab.
+
 1. Open the `Choose File` tab.
 2. Keep `Upload Type` set to `Select from the list` for bundled demo data, or choose `Upload files` for your own table.
 3. Select one or more data sets.
@@ -80,6 +89,17 @@ These are HARPS RV time series fetched with `dace-query` and saved in Agatha's t
 6. Use the `Model Comparison` tab to compare AR, MA, and proxy noise models.
 7. Use the `1D Periodogram` tab to calculate BFP, MLP, or related periodograms.
 8. Use the `2D Periodogram` tab to calculate moving periodograms and check whether a signal is stable in time.
+   Once a 1D fit exists for the same data sets, tick `Use the signal-only data of the 1D fit`:
+   Tick `Adaptive windows` for irregularly sampled data: each window then holds the number of
+   points a window of the chosen width contains on average (wider windows over sparse epochs,
+   narrower over dense ones), so no window is empty; the period grid stays that of the chosen
+   width. The same option exists in the `Signal Diagnosis` tab, where it is on by default.
+   the sets are combined after removing the per-set offsets, the trend and the red-noise model
+   of that fit (the MCMC solution when MCMC was run), so the moving periodogram runs on a
+   single long-baseline series containing only the potential signals and white noise. This is
+   the best test of the time consistency of long-period signals. The combined series can be
+   downloaded. From R, pass `use.fit=TRUE` in `per.par` and the `calc.1Dper()` result as
+   `fit1D` to `per2D.data()`.
 9. Download plots or data tables from the download buttons shown in each tab.
 
 ### Demo: bundled RV data
@@ -327,7 +347,59 @@ With several data sets and the GP noise model, the MCMC samples on the GP-whiten
 For a single data set the GP MCMC is not implemented and the maximum-likelihood fit is
 returned with a warning.
 
-## 6. Figures
+## 6. Signal diagnosis
+
+The `Signal Diagnosis` tab reproduces the diagnostic figures of Feng et al. (2020, ApJS 250,
+29, Figs. 5-16) for the selected RV data sets:
+
+- black: BFPs of the combined data with the signals subtracted in sequence (the sequential
+  search with model comparison of section 8), for each chosen noise model - white, MA(1),
+  AR(1) and the GP (with the oscillation period and damping time optionally fixed; a free GP
+  period can absorb a real signal); the first chosen model defines the reported signals;
+- blue: the window function of the combined data and the BFPs of every activity index of every
+  data set (columns four onwards of the data files);
+- grey: the BFP of each data set on its own;
+- red vertical lines at the accepted periods, a dashed line at the ln(BF) threshold, and a
+  green dotted line at an optional rotation period; the panels are grouped under headers
+  (combined data, individual data sets, activity indices, window function);
+- one moving periodogram per accepted signal, computed on the signal-only combined series
+  with the other accepted signals subtracted (the paper's Fig. 5).
+
+The table above the figure applies the four criteria of the paper to every accepted signal:
+significance (ln(BF) above the threshold), robustness (the signal accepted under every noise
+model within 10 per cent of its period), activity (no index peaking above the threshold
+within 10 per cent), and time consistency (the number of windows of the moving periodogram
+in which the signal exceeds the threshold; not applied to periods longer than half the time
+span). It also flags a period coinciding with the strongest window-function peak. The figure
+and the table can be downloaded. From R: `diagnose.signals()`, `diagnosis.table()` and
+`diagnosis.plot()` in `functions.R`.
+
+## 7. N-body stability
+
+The `N-body Stability` tab takes the planets of the current 1D solution (the MAP of the MCMC
+when it ran, otherwise the maximum-likelihood fit; Keplerian or circular signals), a stellar
+mass and an inclination (coplanar orbits, m = m sin i / sin i), and tests whether the system
+survives:
+
+- analytically, for every adjacent pair: the AMD-stability of Laskar & Petit (2017) with the
+  Hill limit of Petit, Laskar & Boue (2018), and the separation in mutual Hill radii;
+- numerically, with REBOUND's WHFast integrator (`scripts/nbody_rebound.py`; install with
+  `python3 -m pip install --user "rebound<5"`, version 5.1.1 has a broken wheel on macOS) for
+  e.g. 10 Myr, or with a short-term leapfrog in R when Python or REBOUND are missing. A system
+  is unstable at an escape, a close encounter within the chosen number of mutual Hill radii, a
+  drift of a semi-major axis beyond the tolerance, or e > 0.9. Either the nominal solution
+  alone or the nominal solution plus a Monte Carlo sample (rows of the MCMC posterior, or
+  Gaussian draws from the 1-sigma quantiles) is integrated; the sample gives the fraction of
+  stable systems as a function of time.
+
+The tab estimates the number of steps and the run time before you start: 10 Myr for a
+planet with a period of days is billions of steps even for REBOUND, so scale the integration
+time to the system. The integration runs in a separate process (`scripts/nbody_run.R`, started
+by `nbody.launch()`), so the app stays responsive; the progress bar follows the integration
+time of the current system, and `Stop` kills the job. From R: `rv2orbits()`, `amd.stability()`, `nbody.samples()`,
+`nbody.run()`, `nbody.classify()` and `nbody.plot()` in `nbody.R`.
+
+## 8. Figures
 
 All 1D figures - periodograms, phase-folded signals, the combined fit and the residuals - are
 drawn by single-panel functions (`panel.periodogram`, `panel.phase`, `panel.fit`,
@@ -336,6 +408,23 @@ tick marks, colour-blind-safe colours (Okabe-Ito), readable titles, the peak ann
 period, significance thresholds as dashed lines, and RMS values on the fit and residual
 panels. The on-screen figure and every download use the same drawing.
 
+With several data sets the points of the phase-folded, combined-fit and residual panels are
+coloured by data set (a fixed colour-blind-safe order, with a different symbol per set as a
+second cue) and a legend names the sets. The phase data downloaded from the app carry the set
+index of every point in the column `set0`.
+
+A further panel, `Parameter table`, lists the fitted parameters of each observable: with an
+MCMC run the MAP value (the sample of maximum likelihood), the mean, the median and the 16 and
+84 per cent quantiles (the 1-sigma interval); without MCMC the maximum-likelihood values. It
+spans both columns of the figure grid, as does the `Model comparison` panel that follows it
+when signals were searched sequentially. Both are part of the on-screen figure and the
+bundled PDF, and can be downloaded on their own. From R, `par.table(out$par.list$RV)` returns
+the same table as a data frame.
+
+Data sets are labelled by instrument: a set called `star_instrument` (the file name) appears
+as `instrument` in legends and in the per-set parameter names of the table, unless two sets
+would then share a label. The downloaded data keep the full names.
+
 Under `Download an individual figure` in the 1D panel, choose any panel of the current result,
 the format (`PDF` vector, `PNG` or `JPG`), the size in inches and the resolution in dpi, and
 download it on its own. `Download all figures (PDF)` still gives the bundled multi-page file.
@@ -343,7 +432,7 @@ From R, `list.single.plots(out)` lists the panels of a `calc.1Dper()` result and
 `save.single.plot(file, format, width, height, dpi, plot1D.single(out, kind, ypar, index))`
 writes one of them.
 
-## 7. MCMC sampling
+## 9. MCMC sampling
 
 When `MCMC sample size` is set to a non-zero value, the signal found by the periodogram is
 constrained with a parallel-tempering (replica-exchange) MCMC. A ladder of chains samples
@@ -380,6 +469,50 @@ The behaviour is controlled by the arguments of `mcfit()` and `sigfit()`:
 
 `run.ptmcmc()` also accepts `adapt.ladder`, `adapt.window`, `adapt.nu`, `adapt.t0`,
 `max.extend` and `Rhat.max` for finer control.
+
+With `Find additional signals sequentially`, each further signal is searched in the residual
+of the previous fit and compared with the model without it (see the next section). When MCMC
+is on, that residual is the data minus the signal of the maximum-likelihood MCMC sample of
+every previous signal (not the periodogram's own optimum). For a single data set the accepted
+signals are refined together by a joint MCMC after every addition, so the final parameters
+come from the joint fit of all accepted signals.
+
+### Number of signals by model comparison
+
+Signals are added one at a time. Each addition is scored by the BIC-estimated log Bayes
+factor against the model without it, `ln(BF) = delta(max ln L) - (extra parameters / 2) ln N`:
+
+- for a single data set with MCMC on, from the maximum likelihood of the joint MCMC of all
+  signals so far against the previous joint MCMC (labelled `joint MCMC (BIC)`);
+- otherwise from the periodogram in which the signal was found (`periodogram (BIC)`, the peak
+  of the BFP; the Keplerian fit's own value for the first signal of a multi-set fit).
+
+A signal is accepted when `ln(BF)` exceeds the threshold `ln(BF) a further signal must exceed`
+(default 5, i.e. odds of about 150:1). The search stops at the first rejected signal, whose
+periodogram is still shown; the combined model, the parameter table and the phase plots keep
+the accepted signals only. The most plausible number of signals is the number accepted, at
+most the maximum number searched. The `Model comparison` panel lists the periods, `ln(BF)`
+values and verdicts; from R the table is `out$model.comp[[observable]]` and the number
+`out$Nopt[[observable]]`. Periodogram types without a Bayes factor (MLP, GLS, ...) give no
+`ln(BF)` and their signals are accepted by default.
+
+### Eccentricity prior
+
+With a Keplerian signal and a non-zero MCMC sample size, `Eccentricity prior of the MCMC`
+chooses the prior on the eccentricity:
+
+- `Beta distribution (Kipping 2013)` (default) - Beta(a, b) with a=0.867 and b=3.03, the
+  distribution of RV planet eccentricities derived by Kipping (2013, MNRAS 434, L51,
+  https://arxiv.org/abs/1306.4982); both shape parameters can be edited.
+- `Uniform` - flat on [0, 1).
+- `Half-Gaussian` - a Gaussian of zero mean and the given sigma (default 0.1) folded onto
+  e >= 0.
+
+All other parameters keep flat priors within their boxes. From R, pass
+`e.prior=list(type='beta'|'uniform'|'halfgauss', a=, b=, sigma=)` in `per.par` to
+`calc.1Dper()` or directly to `sigfit()`, `mcfit()` and `mcfit.multiset()`; see `eprior.log()`.
+Scripts that call `prior.func()` without defining `e.prior` keep the historical half-Gaussian
+of scale `Esd`.
 
 MCMC refinement also works with several data sets selected (`mcfit.multiset`): the sampled
 model is the shared signal (Keplerian or circular), one offset per data set, a shared linear

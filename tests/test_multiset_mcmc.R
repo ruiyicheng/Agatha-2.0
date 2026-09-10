@@ -77,6 +77,16 @@ expect_true(all(c('P1','K1','e1')%in%colnames(psg)) && !any(grepl('^sj_',colname
 expect_true(abs(psg['mode','P1']-P)<0.5,paste('multi-set GP MCMC gave P=',psg['mode','P1']))
 
 ####################################################
+## The eccentricity prior reaches the multi-set MCMC: a narrow half-Gaussian
+## pulls the eccentricity below the value found with the (default) beta prior
+####################################################
+pph <- pp; pph$Niter <- 1000; pph$e.prior <- list(type='halfgauss',sigma=0.02)
+outh <- calc.1Dper(Nmax.plots=2,vars='RV',per.par=pph,data=d2,Ncores=1)
+eh <- outh$par.list$RV['med','e1']
+expect_true(is.finite(eh) && eh<ps['med','e1'],
+            paste('the half-Gaussian eccentricity prior gave e=',eh,'not below the beta-prior value',ps['med','e1']))
+
+####################################################
 ## Sequential signals with several data sets and MCMC: each signal is refined
 ## by its own multi-set MCMC and the combined model is assembled from the
 ## per-signal fits (this exact combination used to die on colnames(NULL))
@@ -85,9 +95,21 @@ pps <- pp
 pps$sequence <- TRUE; pps$Nsig.max <- 2; pps$per.type.seq <- 'BFP'; pps$Niter <- 1000
 outs <- calc.1Dper(Nmax.plots=50,vars='RV',per.par=pps,data=d2,Ncores=1)
 phs <- outs$phase.list$RV
-expect_true(all(c('ysig_sig1','ysig_sig2','y_all','res_all')%in%colnames(phs)),
+expect_true(all(c('ysig_sig1','y_all','res_all')%in%colnames(phs)),
             'sequential multi-set MCMC did not return the per-signal and combined columns')
 expect_true(all(is.finite(phs[,'res_all'])),'sequential multi-set MCMC produced non-finite residuals')
 expect_true(ncol(outs$per.list$RV)>=3,'the second signal periodogram is missing')
+####only one signal was injected: the model comparison must reject the second
+####and keep it out of the combined model, while its periodogram is reported
+mcs <- outs$model.comp$RV
+expect_true(is.data.frame(mcs) && nrow(mcs)==2 && mcs$accepted[1] && !mcs$accepted[2],
+            paste('the multi-set model comparison gave accepted =',paste(mcs$accepted,collapse=','),'lnBF =',paste(round(mcs$lnBF,1),collapse=',')))
+expect_true(outs$Nopt$RV==1,paste('the most plausible number of signals is',outs$Nopt$RV,'instead of 1'))
+expect_true(!('ysig_sig2'%in%colnames(phs)),'the rejected second signal is still part of the combined model')
+####the parameter table keeps the posterior summaries (MAP, quantiles), with the period linear
+pss <- outs$par.list$RV
+expect_true(is.matrix(pss) && 'P1'%in%colnames(pss) && all(c('xopt','med','xminus.1sig','xplus.1sig')%in%rownames(pss)),
+            'sequential multi-set MCMC did not keep the posterior summaries')
+expect_true(abs(pss['med','P1']-P)<0.5,paste('the sequential multi-set fit reports P1 =',pss['med','P1']))
 
 cat('multi-set MCMC tests passed\n')

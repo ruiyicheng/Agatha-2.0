@@ -14,13 +14,19 @@ solve.try <- function(lin.mat,vec.rh){
     white.par <- try(solve(lin.mat,vec.rh),TRUE)#gamma,beta,dj
     if(class(white.par)=='try-error')     white.par <- try(solve(lin.mat,vec.rh,tol=tol33),TRUE)
 #    if(class(white.par)=='try-error')     white.par <- try(solve(lin.mat,vec.rh,tol=tol3),TRUE)
-    if(class(white.par)=='try-error')     white.par <- try(solve(nearPD(lin.mat)$mat,vec.rh,tol=tol33),TRUE)
+    if(class(white.par)[1]=='try-error' && requireNamespace('Matrix',quietly=TRUE)){
+###nearest positive-definite matrix; Matrix::solve returns an S4 matrix, which
+###the callers cannot name, so it is turned back into a plain vector
+        white.par <- try(solve(Matrix::nearPD(lin.mat)$mat,vec.rh,tol=tol33),TRUE)
+        if(class(white.par)[1]!='try-error') white.par <- as.numeric(as.matrix(white.par))
+    }
     if(class(white.par)[1]=='try-error'){
 ###singular normal equations (e.g. a tiny time window with more linear terms
 ###than points): return zeros so the caller gets a finite, poor likelihood
 ###instead of an error object
         white.par <- rep(0,length(vec.rh))
     }
+    if(isS4(white.par)) white.par <- as.numeric(as.matrix(white.par))
     return(white.par)
 }
 
@@ -2658,21 +2664,38 @@ fsample <- function(fmin,fmax,sampling,section=1,ofac=1,unit=1){
 }
 ####Bayes factor periodogram
 #####moving periodogram
-MP <- function(t, y, dy,Dt,nbin,fmax=1,ofac=1,fmin=1/1000,tspan=NULL,Indices=NA,per.type='MLP',...){
+MP <- function(t, y, dy,Dt,nbin,fmax=1,ofac=1,fmin=1/1000,tspan=NULL,Indices=NA,per.type='MLP',adaptive=FALSE,...){
+###nbin windows of width Dt sliding over the time span; with adaptive=TRUE the
+###windows hold a fixed number of points instead (the number a window of
+###width Dt holds on average), so irregular sampling never leaves a window
+###empty: sparse epochs get wider windows, dense epochs narrower ones. The
+###period grid stays that of the nominal width Dt, so the columns are comparable
+    ord <- order(t)
+    t <- t[ord]; y <- y[ord]; dy <- dy[ord]
+    if(!is.null(Indices) && !all(is.na(Indices))) Indices <- as.matrix(Indices)[ord,,drop=FALSE]
     n <- nbin-1
-    dt <- (max(t)-min(t)-Dt)/n
-    tstart <- min(t)+(0:n)*dt
-    tend <- min(t)+(0:n)*dt+Dt
+    Nmin <- mp.min.points(per.type,Indices,...)
+    N <- length(t)
+    if(adaptive){
+        nw <- max(Nmin,min(N,round(N*Dt/(max(t)-min(t)))))
+        starts <- unique(round(seq(1,max(1,N-nw+1),length.out=nbin)))
+        n <- length(starts)-1; nbin <- n+1
+        ends <- pmin(starts+nw-1,N)
+        tstart <- t[starts]; tend <- t[ends]
+    }else{
+        dt <- (max(t)-min(t)-Dt)/n
+        tstart <- min(t)+(0:n)*dt
+        tend <- min(t)+(0:n)*dt+Dt
+    }
     tmid <- (tstart+tend)/2
     df <- 1/(Dt*ofac)
-    rel.powers <- powers <- c()
+    cols <- rels <- vector('list',nbin)
     ndata <- rep(NA,nbin)
     Pgrid <- NULL
-    Nmin <- mp.min.points(per.type,Indices,...)
     withProgress(message = 'Calculating moving periodogram', value = 0, {
         for(j in 0:n){
             incProgress(1/nbin, detail = paste0('window ',j+1,'/',nbin))
-            inds <- which(t>=min(t)+j*dt & t<min(t)+j*dt+Dt)
+            inds <- if(adaptive) starts[j+1]:ends[j+1] else which(t>=tstart[j+1] & t<tend[j+1])
             index <- NULL
             if(!is.null(Indices) && !all(is.na(Indices)) && length(inds)>0){
                 index <- as.matrix(Indices[inds,,drop=FALSE])
@@ -2701,12 +2724,17 @@ MP <- function(t, y, dy,Dt,nbin,fmax=1,ofac=1,fmin=1/1000,tspan=NULL,Indices=NA,
             }
             col <- mp.window.column(tmp,per.type,Pgrid)
             if(is.null(Pgrid) && !is.null(col$P)) Pgrid <- col$P
-            rel.powers <- cbind(rel.powers,col$rel)
-            powers <- cbind(powers,col$pp)
+            cols[[j+1]] <- col$pp
+            rels[[j+1]] <- col$rel
         }
     })
     if(is.null(Pgrid)) stop('No moving-time window contains enough data for the chosen periodogram; increase the window or reduce the model.')
-    return(list(tmid=tmid,P=Pgrid,powers=powers,rel.powers=rel.powers,ndata=ndata))
+###every window gets a column of the full grid, so the columns line up with
+###tmid; windows skipped before the grid was known are filled with NA
+    full <- function(v) if(length(v)!=length(Pgrid)) rep(NA,length(Pgrid)) else v
+    powers <- do.call(cbind,lapply(cols,full))
+    rel.powers <- do.call(cbind,lapply(rels,full))
+    return(list(tmid=tmid,P=Pgrid,powers=powers,rel.powers=rel.powers,ndata=ndata,tstart=tstart,tend=tend,adaptive=adaptive))
 }
 
 mp.min.points <- function(per.type,Indices,...){
