@@ -1255,10 +1255,14 @@ gp_sho_cov <- function(t, sigmaGP, logProt, logtauGP, dy=NULL, sj=0){
     tau <- abs(outer(t,t,'-'))
     eta <- sqrt(abs(1-1/(4*Q^2)))
     A <- S0*w0*Q*exp(-w0*tau/(2*Q))
-    if(Q<0.5){
-        K <- A*(cosh(eta*w0*tau)+sinh(eta*w0*tau)/(2*eta*Q))
-    }else if(abs(Q-0.5)<1e-12){
-        K <- A*2*(1+w0*tau)
+    if(abs(Q-0.5)<1e-8){
+        K <- A*(1+w0*tau)
+    }else if(Q<0.5){
+        root <- sqrt(1-4*Q^2)
+        rate.slow <- 2*w0*Q/(1+root)
+        rate.fast <- w0*(1+root)/(2*Q)
+        K <- S0*w0*Q/2*((1+1/root)*exp(-rate.slow*tau)+
+                        (1-1/root)*exp(-rate.fast*tau))
     }else{
         K <- A*(cos(eta*w0*tau)+sin(eta*w0*tau)/(2*eta*Q))
     }

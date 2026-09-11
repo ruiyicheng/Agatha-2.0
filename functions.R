@@ -70,17 +70,10 @@ read.agatha.table <- function(path, center.rv=FALSE){
     }
     inds <- sort(tab[,1],index.return=TRUE)$ix
     tab <- tab[inds,,drop=FALSE]
-    duplicate.time <- duplicated(tab[,1])
-    if(any(duplicate.time)){
-        tab <- tab[!duplicate.time,,drop=FALSE]
-    }
-    if(ncol(tab)>3){
-        for(j in 4:ncol(tab)){
-            if(is.na(sd(tab[,j])) || sd(tab[,j])==0){
-                tab[,j] <- abs(rnorm(nrow(tab),1,0.01))
-            }
-        }
-    }
+    # Preserve measured proxy values and missingness. Filtering or aggregating
+    # observations belongs in an explicit, logged preprocessing step.
+    duplicate.row <- duplicated(tab)
+    if(any(duplicate.row)) tab <- tab[!duplicate.row,,drop=FALSE]
     if(!has.header || any(grepl('^V[[:digit:]]+$',colnames(tab)[1:min(3,ncol(tab))]))){
         colnames(tab)[1:3] <- c('Time','RV','eRV')
         if(ncol(tab)>3){

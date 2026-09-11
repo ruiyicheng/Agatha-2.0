@@ -579,10 +579,13 @@ ker.sho <- function(x,y,S0,logQ,logProt){
     w0 <- 2*pi/exp(logProt)
     eta <- abs(1-(4*Q^2)^(-1))^0.5
     A <- S0*w0*Q*exp(-w0*tau/(2*Q))
-    if(Q>0 & Q<1/2){
-        A*(cosh(eta*w0*tau)+sinh(eta*w0*tau)/(2*eta*Q))
-    }else if(Q==1/2){
-        A*(2*(1+w0*tau))
+    if(abs(Q-1/2)<1e-8){
+        A*(1+w0*tau)
+    }else if(Q>0 & Q<1/2){
+        root <- sqrt(1-4*Q^2)
+        slow <- 2*w0*Q/(1+root)
+        fast <- w0*(1+root)/(2*Q)
+        S0*w0*Q/2*((1+1/root)*exp(-slow*tau)+(1-1/root)*exp(-fast*tau))
     }else if(Q>1/2){
         A*(cos(eta*w0*tau)+sin(eta*w0*tau)/(2*eta*Q))
     }

@@ -1,0 +1,27 @@
+name: agatha-vetting
+channels:
+  - conda-forge
+dependencies:
+  - r-base=4.4
+  - r-minpack.lm
+  - r-magicaxis
+  - r-foreach
+  - r-domc
+  - r-fields
+  - r-doparallel
+  - r-e1071
+  - r-kernlab
+  - r-glasso
+  - r-matrixcalc
+  - r-matrix
+  - r-mvtnorm
+  - r-rootsolve
+  - r-shiny
+  - python=3.11
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - pip
+  - pip:
+      - pypdf
