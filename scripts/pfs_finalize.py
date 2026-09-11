@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-RETRY_TREES = ['numerical_retry', 'extended_retry', 'analytic_retry', 'analytic_extended']
+RETRY_TREES = ['numerical_retry', 'extended_retry', 'checkpoint_retry', 'analytic_retry', 'analytic_extended']
 
 
 def main():

@@ -129,3 +129,9 @@ snapshots. Periodogram scans retain their existing implementation. Analytic
 derivatives can follow a different optimization trajectory from finite
 differences; compare diagnostics and retain the run provenance when selecting
 final reports.
+
+If complete alternative fits produce different decompositions, append a coded
+comparison after the final PDF refresh and before validation with
+`python Agatha-2.0/scripts/pfs_optimizer_appendix.py analysis/pfs_735_vetting --codes P0510`.
+The comparison explicitly treats the two runs as fits to the same data and
+flags non-unique interpretations. It does not call them independent evidence.
