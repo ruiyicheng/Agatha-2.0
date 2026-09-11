@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 
+RETRY_TREES = ['numerical_retry', 'extended_retry', 'analytic_retry', 'analytic_extended']
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -20,13 +22,15 @@ def main():
             raise SystemExit(f'Wait for pending work: {path}')
     promotions = []
     choices = {}
-    for tree in ['numerical_retry', 'extended_retry']:
+    for tree in RETRY_TREES:
         for source in sorted((out / tree / 'results').glob('P*')):
             path = source / 'summary.json'
             if not path.exists():
                 raise SystemExit(f'Retry still running or missing summary: {source}')
             result = json.loads(path.read_text())
             score = (result['status'] == 'complete', result['status'] != 'failed', result['n_signals'])
+            if source.name in choices and choices[source.name][0][0]:
+                continue  # Keep the first completed search, regardless of component count.
             if source.name not in choices or score > choices[source.name][0]:
                 choices[source.name] = (score, source)
     for _, source in choices.values():
@@ -64,7 +68,7 @@ def main():
             raise SystemExit(f'Missing PDF: {code}')
         base = out / 'first_pass_archive/results' / code / 'summary.json'
         seconds = json.loads(base.read_text())['elapsed_seconds'] if base.exists() else result['elapsed_seconds']
-        for tree in ['numerical_retry', 'extended_retry']:
+        for tree in RETRY_TREES:
             attempt = out / tree / 'results' / code / 'summary.json'
             if attempt.exists():
                 seconds += json.loads(attempt.read_text())['elapsed_seconds']

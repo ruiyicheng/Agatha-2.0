@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from vetting_core import ConditionalRV,kepler_basis,fit_planets
+from vetting_core import ConditionalRV,kepler_basis,fit_planets,kepler_objective
 from pfs_search import search,parse_source
 
 def model(t,y,error=1.):
@@ -53,6 +53,28 @@ def test_resume_search_preserves_prior_component():
     assert history[0]['n_existing_signals']==1
     assert reason=='lnBF_below_5' and len(fit['parameters'])==2
     assert np.max(abs(np.sort(fit['parameters'][:,0])-[17,43]))<.1
+
+def test_analytic_jacobian_with_arma_noise():
+    rng=np.random.default_rng(71);t=np.sort(rng.uniform(0,300,180));ids=np.where(np.arange(len(t))%2,'A','B')
+    noise=pd.DataFrame([dict(set_id=s,jitter=.2,Nma=2,Nar=1,tau=4,tauAR=3,m1=.3,m2=-.1,l1=.2) for s in ['A','B']]).set_index('set_id')
+    pars=np.array([[17.,.2,.4],[43.,.55,1.1]])
+    B=np.column_stack([kepler_basis(t,*p) for p in pars]);m=ConditionalRV(t,B@np.array([5.,1.,3.,2.])+rng.normal(0,.3,len(t)),np.full(len(t),.3),ids,noise)
+    v=pars.copy();v[:,0]=np.log(v[:,0]);v=v.ravel();fun,jac=kepler_objective(m);h=1e-6
+    numeric=np.column_stack([(fun(v+np.eye(len(v))[k]*h)-fun(v-np.eye(len(v))[k]*h))/(2*h) for k in range(len(v))])
+    assert np.linalg.norm(jac(v)-numeric)/np.linalg.norm(numeric)<1e-6
+    assert np.max(abs(fun(v)-m.fit_basis(B)['residual']/m.error))<1e-10
+
+def test_analytic_blind_recovery_and_resume():
+    import functools,pfs_search
+    original=pfs_search.fit_planets
+    try:
+        pfs_search.fit_planets=functools.partial(fit_planets,analytic_jac=True)
+        test_blind_two_signals_and_threshold_stop()
+        test_resume_search_preserves_prior_component()
+        test_zero_signal_is_a_valid_result()
+        test_noise_is_updated_after_each_accepted_signal()
+        test_insufficient_dof_not_misreported_as_nondetection()
+    finally:pfs_search.fit_planets=original
 
 if __name__=='__main__':
     import tempfile

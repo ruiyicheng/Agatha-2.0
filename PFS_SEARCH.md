@@ -106,3 +106,26 @@ finalization to check all PDFs for explicit target names, accepted-peak
 thresholds, component counts, scan/history alignment and completion flags.
 This checks explicit-name removal; it cannot prevent identifying a familiar
 system from its measured periods.
+
+## Analytic derivative option
+
+`fit_planets(..., analytic_jac=True)` computes the exact derivative of the
+least-squares projection over the Keplerian amplitudes, including both
+projection-derivative terms. It retains the same likelihood, noise transform,
+rank cutoff, parameter bounds and convergence tolerances. The default remains
+finite differences. Regression checks compare the residuals and derivatives
+with the existing implementation and verify blind recovery and resumption.
+
+For expensive targets, an independent accelerated attempt can start from a
+saved accepted model, or from zero components if no model checkpoint exists:
+
+```bash
+python Agatha-2.0/scripts/pfs_analytic_retry.py analysis/pfs_735_vetting \
+  --codes P0002 P0509 --rscript .envs/agatha/bin/Rscript --workers 2
+```
+
+The separate `analytic_retry/` tree contains the results and immutable input
+snapshots. Periodogram scans retain their existing implementation. Analytic
+derivatives can follow a different optimization trajectory from finite
+differences; compare diagnostics and retain the run provenance when selecting
+final reports.
