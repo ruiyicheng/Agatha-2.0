@@ -135,3 +135,12 @@ comparison after the final PDF refresh and before validation with
 `python Agatha-2.0/scripts/pfs_optimizer_appendix.py analysis/pfs_735_vetting --codes P0510`.
 The comparison explicitly treats the two runs as fits to the same data and
 flags non-unique interpretations. It does not call them independent evidence.
+
+For a large search that has finished but whose component-removal diagnostics
+are expensive, `scripts/pfs_parallel_tail.py` can resume the saved model with
+independent reduced-model fits in separate processes and frequency scans in
+threads. `--wait` waits for the chosen source search to reach the threshold.
+Parallel fits and frequency chunks are checked against serial results; chunk
+boundaries preserve the original 128-frequency blocks. New checkpoints save
+optimizer bounds. Older checkpoints without bound metadata explicitly flag
+that diagnostic as unavailable.

@@ -76,6 +76,19 @@ def test_analytic_blind_recovery_and_resume():
         test_insufficient_dof_not_misreported_as_nondetection()
     finally:pfs_search.fit_planets=original
 
+def test_missing_checkpoint_bounds_are_not_reported_as_clear():
+    import json,tempfile
+    from pfs_finalize import checkpoint_bound_metadata
+    with tempfile.TemporaryDirectory() as directory:
+        out=Path(directory);dest=out/'results/P0001';source=out/'snapshot';dest.mkdir(parents=True);source.mkdir()
+        record={'parameters':[[17,.2,.4]],'amplitudes':[3,1]}
+        for path in [dest,source]:(path/'model_parameters.json').write_text(json.dumps(record))
+        (dest/'candidates.json').write_text(json.dumps([{'candidate_id':'P0001-S01','flags':'no threshold flags','rv_assessment':'conditionally_supported'}]))
+        checkpoint_bound_metadata(out,dict(code='P0001',n_signals=1,resumed_from=str(source)))
+        candidate=json.loads((dest/'candidates.json').read_text())[0]
+        assert 'period-bound check unavailable' in candidate['flags']
+        assert candidate['rv_assessment']=='inconclusive'
+
 if __name__=='__main__':
     import tempfile
     for name,function in list(globals().items()):

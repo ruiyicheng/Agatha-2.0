@@ -6,7 +6,35 @@ from pathlib import Path
 
 import pandas as pd
 
-RETRY_TREES = ['numerical_retry', 'extended_retry', 'checkpoint_retry', 'analytic_retry', 'analytic_extended']
+RETRY_TREES = ['numerical_retry', 'extended_retry', 'checkpoint_retry', 'analytic_retry', 'parallel_retry', 'analytic_extended']
+
+
+def checkpoint_bound_metadata(out, result):
+    """Do not silently treat an old checkpoint's missing optimizer bounds as clear."""
+    dest=out/'results'/result['code'];path=dest/'model_parameters.json';cp=dest/'candidates.json'
+    if not path.exists() or not cp.exists():return
+    model=json.loads(path.read_text());candidates=json.loads(cp.read_text())
+    source=result.get('resumed_from');unchanged=False
+    if source:
+        source=Path(source)
+        if source==dest and (out/'first_pass_archive/results'/result['code']).exists():source=out/'first_pass_archive/results'/result['code']
+        saved=source/'model_parameters.json'
+        unchanged=saved.exists() and len(json.loads(saved.read_text())['parameters'])==result['n_signals']
+    unavailable=unchanged and model.get('bounds') is None and model.get('period_boundary_flags') is None
+    if unavailable:
+        changed=False
+        for candidate in candidates:
+            if 'period-bound check unavailable' in candidate['flags']:continue
+            old=candidate['flags'];candidate['flags']=('' if old=='no threshold flags' else old+'; ')+'period-bound check unavailable in checkpoint'
+            if candidate['rv_assessment']=='conditionally_supported':candidate['rv_assessment']='inconclusive'
+            changed=True
+        if changed:
+            cp.write_text(json.dumps(candidates,indent=2)+'\n')
+            pd.DataFrame(candidates).to_csv(dest/'candidates.csv',index=False)
+            (dest/'report_status.json').unlink(missing_ok=True)
+    elif not any('period-bound check unavailable' in c['flags'] for c in candidates):
+        model['period_boundary_flags']=['period boundary' in c['flags'] for c in candidates]
+        path.write_text(json.dumps(model,indent=2)+'\n')
 
 
 def main():
@@ -73,6 +101,7 @@ def main():
             if attempt.exists():
                 seconds += json.loads(attempt.read_text())['elapsed_seconds']
         result['total_elapsed_seconds'] = seconds
+        checkpoint_bound_metadata(out,result)
         (out / 'results' / code / 'summary.json').write_text(json.dumps(result, indent=2) + '\n')
         rows.append(result)
     frame = pd.DataFrame(rows).sort_values('code')

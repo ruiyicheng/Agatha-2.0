@@ -187,6 +187,10 @@ def diagnostics(d,ins,noise,model,fit,frequency,dest,code):
         if delta<=10:flags.append('weak conditional inclusion evidence')
         if e>=.8499:flags.append('eccentricity boundary')
         if 'bounds' in fit and (period<=fit['bounds'][0][j]*1.0001 or period>=fit['bounds'][1][j]*.9999):flags.append('period boundary')
+        elif 'bounds' not in fit:
+            if 'period_boundary_flags' in fit:
+                if fit['period_boundary_flags'][j]:flags.append('period boundary')
+            else:flags.append('period-bound check unavailable in checkpoint')
         if span/period<2:flags.append('fewer than 2 cycles')
         if any(r['candidate_id']==cid and r['proxy_lnBF']>=5 for r in matches):flags.append('nearby secondary activity peak')
         if support and np.mean(support)<.5:flags.append('time instability')
@@ -224,9 +228,15 @@ def run_target(row,out,rscript,resume_from=None,fit_budget=300,warm_starts=False
         elif not initial.exists():noise_run(task,initial,rscript)
         noise=chosen(initial);model=model_for(d,noise)
         if resume_from is not None:
-            pars=np.asarray(json.loads((resume_from/'model_parameters.json').read_text())['parameters'],float).reshape(-1,3)
+            checkpoint_parameters=json.loads((resume_from/'model_parameters.json').read_text())
+            pars=np.asarray(checkpoint_parameters['parameters'],float).reshape(-1,3)
             basis=np.column_stack([kepler_basis(model.t,*par) for par in pars]) if len(pars) else np.empty((len(d),0))
             previous_fit=model.fit_basis(basis);previous_fit.update(parameters=pars,components=np.column_stack([basis[:,2*j:2*j+2]@previous_fit['amplitude'][2*j:2*j+2] for j in range(len(pars))]) if len(pars) else np.empty((len(d),0)),converged=True,nfev=0)
+            if checkpoint_parameters.get('bounds') is not None:previous_fit['bounds']=tuple(np.asarray(b,float) for b in checkpoint_parameters['bounds'])
+            elif checkpoint_parameters.get('period_boundary_flags') is not None:previous_fit['period_boundary_flags']=checkpoint_parameters['period_boundary_flags']
+            elif (resume_from/'candidates.json').exists():
+                prior_candidates=json.loads((resume_from/'candidates.json').read_text())
+                if len(prior_candidates)==len(pars) and not any('period-bound check unavailable' in r['flags'] for r in prior_candidates):previous_fit['period_boundary_flags']=['period boundary' in r['flags'] for r in prior_candidates]
             previous_stages=pd.read_csv(resume_from/'search_history.csv').iloc[:-1].to_dict('records')
             previous_powers=np.load(resume_from/'search_periodograms.npz')['power'][:-1]
         begin=time.perf_counter();model.scan(frequency[np.linspace(0,len(frequency)-1,min(128,len(frequency)),dtype=int)])
@@ -249,7 +259,7 @@ def run_target(row,out,rscript,resume_from=None,fit_budget=300,warm_starts=False
         data=pd.DataFrame(dict(t_days=d.t,set_id=d.set_id,rv=d.y,error=d.error,effective_error=model.error,model=fit['deterministic'],residual=fit['residual']))
         for j in range(accepted):data[f'component_{j+1}']=fit['components'][:,j]
         data.to_csv(dest/'fit.csv',index=False)
-        dump(dest/'model_parameters.json',dict(parameters=fit['parameters'].tolist(),amplitudes=fit['amplitude'].tolist()))
+        dump(dest/'model_parameters.json',dict(parameters=fit['parameters'].tolist(),amplitudes=fit['amplitude'].tolist(),bounds=[b.tolist() for b in fit['bounds']] if 'bounds' in fit else None,period_boundary_flags=fit.get('period_boundary_flags')))
         summary.update(n_signals=accepted,stop_reason=reason,search_complete=reason=='lnBF_below_5',last_peak_lnBF=stages[-1]['peak_lnBF'],last_peak_period_days=stages[-1]['peak_period_days'],conditional_chi2=float(fit['chi2']),chi2_per_measurement=float(fit['chi2']/len(d)),optimizer_evaluations=evals)
         dump(dest/'progress.json',dict(code=task.code,stage='diagnostics',n_signals=accepted,elapsed_seconds=time.perf_counter()-start))
         diagnostics(d,ins,noise,model,fit,frequency,dest,task.code)
