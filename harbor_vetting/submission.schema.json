@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "target_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "system": {
+      "type": "object",
+      "properties": {
+        "n_rv": {
+          "type": "integer",
+          "minimum": 101,
+          "maximum": 10000000
+        },
+        "n_components": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "n_instruments": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "chi2_per_measurement": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000000000000.0
+        },
+        "fit_adequacy": {
+          "type": "string",
+          "enum": [
+            "adequate",
+            "poor"
+          ]
+        },
+        "noise_models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "instrument": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "model": {
+                "type": "string",
+                "enum": [
+                  "WN",
+                  "AR1",
+                  "MA1",
+                  "MA2"
+                ]
+              }
+            },
+            "required": [
+              "instrument",
+              "model"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "n_rv",
+        "n_components",
+        "n_instruments",
+        "chi2_per_measurement",
+        "fit_adequacy",
+        "noise_models"
+      ],
+      "additionalProperties": false
+    },
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "properties": {
+          "candidate_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "catalogue_prediction": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "retracted"
+            ]
+          },
+          "probability_confirmed": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "rv_assessment": {
+            "type": "string",
+            "enum": [
+              "conditionally_supported",
+              "unsupported",
+              "inconclusive"
+            ]
+          },
+          "period_days": {
+            "type": "number",
+            "minimum": 1e-05,
+            "maximum": 1000000000.0
+          },
+          "K_m_s": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1000000000.0
+          },
+          "eccentricity": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "delta_BIC": {
+            "type": "number",
+            "minimum": -1000000000000.0,
+            "maximum": 1000000000000.0
+          },
+          "cycles_observed": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1000000000000.0
+          },
+          "flags": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "weak_evidence",
+                "parameter_boundary",
+                "short_baseline",
+                "activity_overlap",
+                "time_instability",
+                "instrument_sensitive",
+                "unknown_period",
+                "nonconvergence",
+                "poor_model_fit"
+              ]
+            },
+            "maxItems": 9
+          },
+          "citations": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "properties": {
+                "page": {
+                  "type": "integer",
+                  "minimum": 2,
+                  "maximum": 6
+                },
+                "quote": {
+                  "type": "string",
+                  "minLength": 20,
+                  "maxLength": 400
+                }
+              },
+              "required": [
+                "page",
+                "quote"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 40,
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "candidate_id",
+          "catalogue_prediction",
+          "probability_confirmed",
+          "rv_assessment",
+          "period_days",
+          "K_m_s",
+          "eccentricity",
+          "delta_BIC",
+          "cycles_observed",
+          "flags",
+          "citations",
+          "rationale"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "target_id",
+    "system",
+    "candidates"
+  ],
+  "additionalProperties": false
+}

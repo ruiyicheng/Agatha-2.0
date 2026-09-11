@@ -3,6 +3,8 @@
 This fork adds a [headless RV evaluation workflow](HEADLESS_VETTING.md) with
 instrument noise selection, fixed-count planet fits, diagnostics, non-MCMC
 tests, runtime estimates and a coded PDF report.
+The [Harbor RV-review benchmark](harbor_vetting/README.md) turns each target PDF
+into a task for catalogue-label prediction and evidence-based assessment.
 
 ## Advanced version of Agatha software for periodic signal diagnostics
 

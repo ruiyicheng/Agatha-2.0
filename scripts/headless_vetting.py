@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('dataset',type=Path);p.add_argument('output',type=Path);p.add_argument('--rscript',type=Path,required=True);p.add_argument('--workers',type=int,default=6);a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('dataset',type=Path);p.add_argument('output',type=Path);p.add_argument('--rscript',type=Path,required=True);p.add_argument('--workers',type=int,default=6);p.add_argument('--harbor-output',type=Path,help='Build per-target Harbor PDF-review tasks after fitting and verification');a=p.parse_args()
     out=a.output.resolve();out.mkdir(parents=True,exist_ok=True);r=a.rscript.resolve();env={**os.environ,'OPENBLAS_NUM_THREADS':'1','OMP_NUM_THREADS':'1'}
     def command(args):subprocess.run(args,cwd=ROOT,env=env,check=True)
     command([sys.executable,'scripts/prepare_vetting.py',str(a.dataset.resolve()),str(out)])
@@ -25,5 +25,7 @@ def main():
     (out/'test_status.json').write_text(json.dumps(status,indent=2))
     command([sys.executable,'scripts/report_vetting.py',str(out)])
     if any(r['status']=='FAIL' for r in status):raise SystemExit('The report was generated, but one or more software checks failed; inspect test_status.json.')
+    if a.harbor_output:
+        command([sys.executable,'harbor_vetting/build_tasks.py',str(out),str(a.harbor_output.resolve())])
     print(out/'agatha_rv_report_anonymized.pdf')
 if __name__=='__main__':main()
