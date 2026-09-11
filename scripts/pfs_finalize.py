@@ -7,14 +7,6 @@ from pathlib import Path
 import pandas as pd
 
 
-def cumulative_seconds(summary):
-    source = summary.get('resumed_from')
-    if source:
-        previous = json.loads((Path(source) / 'summary.json').read_text())
-        return summary['elapsed_seconds'] + cumulative_seconds(previous)
-    return summary['elapsed_seconds']
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('output', type=Path)
@@ -51,7 +43,6 @@ def main():
             retry['status'] == 'search_limited' and retry['n_signals'] > original['n_signals'])
         if not improved:
             continue
-        total_seconds = cumulative_seconds(retry)
         archive = out / 'first_pass_archive'
         (archive / 'results').mkdir(parents=True, exist_ok=True)
         (archive / 'pdf').mkdir(exist_ok=True)
@@ -62,7 +53,6 @@ def main():
         shutil.copytree(source, dest)
         shutil.copy2(retry_pdf, out / 'pdf' / retry_pdf.name)
         retry.update(retry_promoted=True, pdf=str(out / 'pdf' / retry_pdf.name))
-        retry['total_elapsed_seconds'] = total_seconds
         (dest / 'summary.json').write_text(json.dumps(retry, indent=2) + '\n')
         promotions.append(dict(code=source.name, before=original['status'], after=retry['status'],
                                before_signals=original['n_signals'], after_signals=retry['n_signals']))
@@ -72,7 +62,14 @@ def main():
         result = json.loads((out / 'results' / code / 'summary.json').read_text())
         if not (out / 'pdf' / (code + '.pdf')).exists():
             raise SystemExit(f'Missing PDF: {code}')
-        result.setdefault('total_elapsed_seconds', result['elapsed_seconds'])
+        base = out / 'first_pass_archive/results' / code / 'summary.json'
+        seconds = json.loads(base.read_text())['elapsed_seconds'] if base.exists() else result['elapsed_seconds']
+        for tree in ['numerical_retry', 'extended_retry']:
+            attempt = out / tree / 'results' / code / 'summary.json'
+            if attempt.exists():
+                seconds += json.loads(attempt.read_text())['elapsed_seconds']
+        result['total_elapsed_seconds'] = seconds
+        (out / 'results' / code / 'summary.json').write_text(json.dumps(result, indent=2) + '\n')
         rows.append(result)
     frame = pd.DataFrame(rows).sort_values('code')
     frame.to_csv(out / 'run_summary.csv', index=False)
@@ -81,6 +78,7 @@ def main():
     index = frame.reindex(columns=cols).copy()
     index['pdf'] = index.code.map(lambda code: f'pdf/{code}.pdf')
     index.to_csv(out / 'report_index.csv', index=False)
+    index[index.status != 'complete'].to_csv(out / 'search_exceptions.csv', index=False)
     batch.update(reported=len(frame), status_counts=frame.status.value_counts().to_dict(),
                  finalized=True, accepted_signals=int(frame.n_signals.sum()))
     (out / 'batch_status.json').write_text(json.dumps(batch, indent=2) + '\n')
