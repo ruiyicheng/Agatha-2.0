@@ -69,7 +69,7 @@ def kepler_basis(t,period,e,phase):
     nu=2*np.arctan2(np.sqrt(1+e)*np.sin(E/2),np.sqrt(1-e)*np.cos(E/2))
     return np.column_stack((np.cos(nu)+e,np.sin(nu)))
 
-def fit_planets(model,periods,starts=3,max_nfev=250,bounds=None):
+def fit_planets(model,periods,starts=3,max_nfev=250,bounds=None,initial_parameters=None,polish_nfev=1500,warm_starts=False):
     periods=np.asarray(periods);n=len(periods)
     if n==0:return {**model.fit_basis(np.empty((len(model.t),0))), 'parameters':np.empty((0,3)),'components':np.empty((len(model.t),0)),'converged':True,'nfev':0}
     lo=periods*.9 if bounds is None else bounds[0];hi=periods*1.1 if bounds is None else bounds[1]
@@ -81,11 +81,17 @@ def fit_planets(model,periods,starts=3,max_nfev=250,bounds=None):
     best=None
     for j in range(starts):
         v=np.column_stack((np.log(periods),np.full(n,[.01,.25,.55][j%3]),np.full(n,j*np.pi/2))).ravel()
+        if initial_parameters is not None and (j==0 or warm_starts):
+            initial=np.asarray(initial_parameters,float).copy()
+            if initial.shape!=(n,3):raise ValueError('Initial parameters must be (n_signals, 3)')
+            if j>0:
+                initial[-1,1]=[.01,.25,.55][j%3];initial[-1,2]+=j*np.pi/2
+            initial[:,0]=np.log(initial[:,0]);v=np.clip(initial.ravel(),lower+1e-9,upper-1e-9)
         opt=least_squares(residual,v,bounds=(lower,upper),max_nfev=max_nfev,ftol=1e-7,xtol=1e-7,gtol=1e-6,x_scale='jac')
         if best is None or np.sum(opt.fun**2)<np.sum(best.fun**2):best=opt
     # Retry the best solution before accepting an evaluation-limit exit.
     if not best.success:
-        retry=least_squares(residual,best.x,bounds=(lower,upper),max_nfev=1500,ftol=1e-7,xtol=1e-7,gtol=1e-6,x_scale='jac')
+        retry=least_squares(residual,best.x,bounds=(lower,upper),max_nfev=polish_nfev,ftol=1e-7,xtol=1e-7,gtol=1e-6,x_scale='jac')
         if np.sum(retry.fun**2)<=np.sum(best.fun**2):
             retry.nfev+=best.nfev;best=retry
     B=basis(best.x);fit=model.fit_basis(B);par=best.x.reshape(-1,3);par[:,0]=np.exp(par[:,0])
