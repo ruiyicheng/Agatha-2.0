@@ -1,5 +1,9 @@
 # Agatha v2.0
 
+This fork adds a [headless RV evaluation workflow](HEADLESS_VETTING.md) with
+instrument noise selection, fixed-count planet fits, diagnostics, non-MCMC
+tests, runtime estimates and a coded PDF report.
+
 ## Advanced version of Agatha software for periodic signal diagnostics
 
 ### Compared with Agatha v1.0 ([Shiny App](https://phillippro.shinyapps.io/Agatha/) or [GitHub source code](https://github.com/phillippro/agatha)), v2.0 provides the following new features:
