@@ -109,7 +109,7 @@ def report(dest,path):
             if moving:
                 moving=pd.DataFrame(moving)
                 for start in range(0,len(candidates),4):
-                    fig=page(f'{code} | Moving periodograms');chunk=candidates[start:start+4];cols=1 if len(chunk)==1 else 2;rows=int(np.ceil(len(chunk)/cols));axes=fig.subplots(rows,cols,squeeze=False).ravel();fig.subplots_adjust(left=.12,right=.94,top=.90,bottom=.12,hspace=.40,wspace=.35)
+                    fig=page(f'{code} | Moving periodograms');chunk=candidates[start:start+4];cols=1 if len(chunk)==1 else 2;rows=int(np.ceil(len(chunk)/cols));axes=fig.subplots(rows,cols,squeeze=False).ravel();fig.subplots_adjust(left=.12,right=.88,top=.90,bottom=.12,hspace=.40,wspace=.45)
                     for ax,candidate in zip(axes,chunk):
                         subset=moving[moving.candidate_id==candidate['candidate_id']]
                         if subset.empty:ax.text(.5,.5,'Insufficient window coverage',ha='center',transform=ax.transAxes);continue
